@@ -1,0 +1,15 @@
+# Хуки выполняются из корня репозитория, поэтому явно заходим в backend —
+# ruff должен видеть проект так же, как видит его CI (working-directory: backend)
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: bash -c 'cd backend && uv run ruff check .'
+        language: system
+        pass_filenames: false
+      - id: ruff-format
+        name: ruff format
+        entry: bash -c 'cd backend && uv run ruff format --check .'
+        language: system
+        pass_filenames: false
