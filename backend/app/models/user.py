@@ -14,5 +14,5 @@ class UserORM(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, timezone=True, server_default=func.now()
+        DateTime(timezone=True), server_default=func.now()
     )
