@@ -8,7 +8,7 @@ from app.models.base import Base
 
 
 class UserORM(Base):
-    __tablename__ = "user"
+    __tablename__ = "users"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
