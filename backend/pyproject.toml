@@ -21,6 +21,9 @@ dev = [
     "ruff>=0.16.9",
 ]
 
+[tool.mypy]
+plugins = ["pydantic.mypy"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
