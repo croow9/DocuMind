@@ -9,6 +9,9 @@ venv/
 .idea/
 .vscode/
 
+# Загруженные пользователями файлы
+data/
+
 # Tools caches
 .mypy_cache/
 .ruff_cache/
