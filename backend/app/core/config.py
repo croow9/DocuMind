@@ -20,5 +20,8 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
 
+    open_api_key: str
+    embedding_model: str = "text-embedding-3-small"
+
 
 settings = Settings()
