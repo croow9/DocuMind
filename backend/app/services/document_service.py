@@ -5,12 +5,11 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ingestion.storage import DATA_DIR, document_file_path
 from app.models import DocumentORM, UserORM
 from app.models.document import SourceType
 from app.repositories.document_repo import DocumentRepository
 from app.schemas.document import DocumentCreate
-
-DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
 ALLOWED_SUFFIXES = {".pdf", ".md", ".markdown", ".txt"}
 
@@ -51,7 +50,7 @@ class DocumentService:
         )
 
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        (DATA_DIR / f"{document.id}{suffix}").write_bytes(await file.read())
+        document_file_path(document.id, suffix).write_bytes(await file.read())
 
         return await self._create(document)
 
