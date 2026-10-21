@@ -20,8 +20,10 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
 
-    open_api_key: str
+    # Пустой ключ = работаем с FakeEmbedder (разработка и тесты без сети)
+    openai_api_key: str = ""
     embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 1536
 
 
 settings = Settings()
