@@ -20,6 +20,14 @@ class DocumentRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_document_id(self, document_id: UUID) -> DocumentORM | None:
+        """Достать документ без проверки владельца — только для внутренних задач
+        (индексация), пользовательскому коду этот метод недоступен."""
+        result = await self.session.execute(
+            select(DocumentORM).where(DocumentORM.id == document_id)
+        )
+        return result.scalar_one_or_none()
+
     async def list_for_owner(
         self, owner_id: UUID, limit: int = 20, offset: int = 0
     ) -> Sequence[DocumentORM]:

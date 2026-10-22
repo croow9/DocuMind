@@ -48,3 +48,10 @@ class FakeEmbedder(EmbeddingClient):
         for i, byte in enumerate(text.encode("utf-8")):
             vector[i % dimensions] += byte
         return vector
+
+
+def build_embedder() -> EmbeddingClient:
+    """Настоящий API при наличии ключа, детерминированный фейк — без него."""
+    if settings.openai_api_key:
+        return OpenAIEmbedder()
+    return FakeEmbedder()
