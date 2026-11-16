@@ -26,7 +26,7 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Невалидный или просроченный токен",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
 
     user = await UserRepository(db).get_by_id(user_id)
 

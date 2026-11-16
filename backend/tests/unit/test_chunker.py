@@ -46,3 +46,21 @@ def test_top_level_heading_resets_nesting() -> None:
     chunks = split_into_chunks(text)
 
     assert [c.heading_path for c in chunks] == ["Один", "Один > Два", "Три"]
+
+
+def test_hash_inside_code_block_is_not_a_heading() -> None:
+    text = "# Установка\n\n```bash\n# скачать\ncurl x\n```\n\nТекст после."
+
+    chunks = split_into_chunks(text)
+
+    assert len(chunks) == 1
+    assert chunks[0].heading_path == "Установка"
+    assert "# скачать" in chunks[0].content
+
+
+def test_heading_after_closed_code_block_is_still_heading() -> None:
+    text = "# Один\n\n~~~\n# внутри\n~~~\n\n## Два\n\nтекст"
+
+    chunks = split_into_chunks(text)
+
+    assert [c.heading_path for c in chunks] == ["Один", "Один > Два"]

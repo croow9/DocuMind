@@ -23,6 +23,8 @@ def split_into_chunks(text: str) -> list[ChunkData]:
     chunks: list[ChunkData] = []
     headings: list[str] = []
     section: list[str] = []
+    # открытый блок кода (его «забор»): внутри него «# ...» — комментарий, не заголовок
+    fence: str | None = None
 
     def flush() -> None:
         content = "\n".join(section).strip()
@@ -36,6 +38,17 @@ def split_into_chunks(text: str) -> list[ChunkData]:
             )
 
     for line in text.splitlines():
+        if fence is not None:
+            section.append(line)
+            if _closes_fence(line, fence):
+                fence = None
+            continue
+        opened = _fence_marker(line)
+        if opened is not None:
+            fence = opened
+            section.append(line)
+            continue
+
         level = _heading_level(line)
         if level is None:
             section.append(line)
@@ -56,6 +69,22 @@ def _heading_level(line: str) -> int | None:
     if 1 <= marks <= 6 and stripped[marks : marks + 1] == " ":
         return marks
     return None
+
+
+def _fence_marker(line: str) -> str | None:
+    """«Забор» блока кода: три и более ` или ~ подряд в начале строки."""
+    stripped = line.lstrip()
+    for char in "`~":
+        run = len(stripped) - len(stripped.lstrip(char))
+        if run >= 3:
+            return stripped[:run]
+    return None
+
+
+def _closes_fence(line: str, fence: str) -> bool:
+    """Закрывает блок строка из тех же символов, не короче открывающего забора."""
+    stripped = line.strip()
+    return stripped.startswith(fence) and set(stripped) == {fence[0]}
 
 
 def _split_long(content: str) -> list[str]:

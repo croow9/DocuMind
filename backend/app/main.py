@@ -10,5 +10,5 @@ app.include_router(documents_router, prefix="/api/v1")
 
 
 @app.get("/")
-def health():
+def health() -> dict[str, str]:
     return {"message": "I'm a live!"}

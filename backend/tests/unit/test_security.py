@@ -27,6 +27,13 @@ def test_verify_password_with_wrong_password() -> None:
     assert not verify_password(wrong_password, hash_true_password)
 
 
+def test_verify_password_longer_than_72_bytes_is_false_not_error() -> None:
+    hash_pass = hash_password("qwerty0123456")
+    long_password = "п" * 40  # 40 символов, но 80 байт
+
+    assert verify_password(long_password, hash_pass) is False
+
+
 def test_same_password_gives_different_hashes() -> None:
     first_password = "asdfgcch1122"
     second_password = "asdfgcch1122"
