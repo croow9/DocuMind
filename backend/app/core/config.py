@@ -20,10 +20,18 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
 
-    # Пустой ключ = работаем с FakeEmbedder (разработка и тесты без сети)
     openai_api_key: str = ""
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
+
+    # Kafka
+    kafka_bootstrap_servers: str = "localhost:9094"
+    kafka_consumer_group: str = "fastapi-app"
+    kafka_auto_offset_reset: str = "earliest"
+
+    # Topics
+
+    # App
 
 
 settings = Settings()

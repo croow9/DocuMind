@@ -7,7 +7,6 @@ import jwt
 
 from app.core.config import settings
 
-# bcrypt умеет хэшировать не больше 72 байт пароля (не символов!)
 BCRYPT_MAX_BYTES = 72
 
 
@@ -20,8 +19,6 @@ def hash_password(password: str) -> str:
 
 def verify_password(plain: str, hashed: str) -> bool:
     plain_bytes = plain.encode("utf-8")
-    # такой пароль не мог быть задан при регистрации, а bcrypt на нём бросил бы
-    # ValueError (500 в логине): просто считаем его неверным
     if len(plain_bytes) > BCRYPT_MAX_BYTES:
         return False
     return bcrypt.checkpw(plain_bytes, hashed.encode("utf-8"))
