@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from pathlib import Path
 from uuid import UUID
@@ -20,10 +21,10 @@ logger = logging.getLogger(__name__)
 async def index_document(document_id: UUID) -> None:
     """Прогнать документ через конвейер индексации.
 
-    Работает как фоновая задача (в M3 — по событию Kafka), поэтому открывает
-    собственную сессию: сессия HTTP-запроса к этому моменту уже закрыта.
-    Любая ошибка переводит документ в failed с текстом причины —
-    документ не теряется никогда.
+    Работает по событию Kafka, поэтому открывает собственную сессию: сессия
+    HTTP-запроса к этому моменту уже закрыта. Ошибки НЕ ловит: при сбое бросает
+    исключение, а вызывающий (воркер) решает — повторить попытку или вызвать
+    mark_failed. Всё незакоммиченное откатывается при выходе из сессии.
     """
     async with AsyncSessionLocal() as session:
         document = await DocumentRepository(session).get_by_document_id(document_id)
@@ -31,18 +32,25 @@ async def index_document(document_id: UUID) -> None:
             logger.warning("Document %s not found, indexing skipped", document_id)
             return
 
-        try:
-            await _run_pipeline(session, document)
-        # ловим всё осознанно: конвейер не должен падать — ошибка становится статусом
-        except Exception as exc:  # noqa: BLE001
-            await session.rollback()
-            # после rollback объект протух: заново загружаем и помечаем failed
-            fresh = await DocumentRepository(session).get_by_document_id(document_id)
-            if fresh is not None:
-                fresh.status = DocumentStatus.FAILED
-                fresh.error = str(exc)[:2000]
-                await session.commit()
-            logger.error("Indexing failed for %s: %s", document_id, exc)
+        await _run_pipeline(session, document)
+
+
+async def mark_failed(document_id: UUID, error: str) -> None:
+    """Пометить документ как failed с текстом причины.
+
+    Вызывается, когда попытки индексации закончились. Открывает новую сессию:
+    сессия упавшей индексации отравлена ошибкой и объект в ней устарел.
+    """
+    async with AsyncSessionLocal() as session:
+        document = await DocumentRepository(session).get_by_document_id(document_id)
+        if document is None:
+            logger.warning("Document %s not found, mark_failed skipped", document_id)
+            return
+
+        document.status = DocumentStatus.FAILED
+        document.error = error[:2000]
+        await session.commit()
+    logger.error("Indexing failed for %s: %s", document_id, error)
 
 
 async def _run_pipeline(session: AsyncSession, document: DocumentORM) -> None:
@@ -53,9 +61,13 @@ async def _run_pipeline(session: AsyncSession, document: DocumentORM) -> None:
         raise ValueError("Индексация документов по URL появится после M2 (отложено)")
 
     suffix = Path(document.original_filename or "").suffix.lower()
-    text = parse_file(document_file_path(document.id, suffix))
+    # парсинг синхронный (pypdf): в потоке, чтобы не вешать event loop
+    text = await asyncio.to_thread(parse_file, document_file_path(document.id, suffix))
 
     pieces = split_into_chunks(text)
+    if not pieces:
+        # скан без текстового слоя или пустой файл: «ready» без чанков вводит в заблуждение
+        raise ValueError("В документе не найден текст для индексации")
     vectors = await build_embedder().embed([piece.content for piece in pieces])
 
     chunks = [
@@ -68,7 +80,11 @@ async def _run_pipeline(session: AsyncSession, document: DocumentORM) -> None:
         )
         for piece, vector in zip(pieces, vectors, strict=True)
     ]
-    await ChunkRepository(session).create_all(chunks)
+    chunk_repo = ChunkRepository(session)
+    # идемпотентность: событие может прийти повторно, старые чанки заменяются
+    # новыми в одной транзакции (коммит ниже)
+    await chunk_repo.delete_by_document_id(document.id)
+    await chunk_repo.create_all(chunks)
 
     document.chunk_count = len(chunks)
     document.status = DocumentStatus.READY

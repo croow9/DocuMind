@@ -14,3 +14,15 @@ class IngestionRequested(BaseModel):
         ...,
     )
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class DeadLetter(BaseModel):
+    """Сообщение, которое не удалось обработать: оригинал и причина отказа."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_topic: str
+    # оригинал как текст: мусорные байты заменяются, чтобы письмо точно отправилось
+    original_value: str
+    error: str
+    failed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

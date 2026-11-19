@@ -1,22 +1,22 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Query, UploadFile, status
+from fastapi import APIRouter, Query, UploadFile, status
 
-from app.api.deps import SessionDep, UserDep
+from app.api.deps import ProducerDep, SessionDep, UserDep
 from app.schemas.document import DocumentCreate, DocumentRead
 from app.services.document_service import DocumentService
-from app.services.ingestion_service import index_document
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
 
 @router.post("", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
 async def create_document(
-    payload: DocumentCreate, user: UserDep, db: SessionDep
+    payload: DocumentCreate, producer: ProducerDep, user: UserDep, db: SessionDep
 ) -> DocumentRead:
     service = DocumentService(db)
     document = await service.create_from_url(user, payload)
+    await service.request_indexing(document, producer)
     return DocumentRead.model_validate(document)
 
 
@@ -24,14 +24,14 @@ async def create_document(
     "/upload", response_model=DocumentRead, status_code=status.HTTP_201_CREATED
 )
 async def upload_document(
-    background_tasks: BackgroundTasks,
+    producer: ProducerDep,
     file: UploadFile,
     user: UserDep,
     db: SessionDep,
 ) -> DocumentRead:
     service = DocumentService(db)
     document = await service.create_from_file(user, file)
-    background_tasks.add_task(index_document, document.id)
+    await service.request_indexing(document, producer)
     return DocumentRead.model_validate(document)
 
 

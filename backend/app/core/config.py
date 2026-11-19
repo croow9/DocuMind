@@ -26,7 +26,7 @@ class Settings(BaseSettings):
 
     # Kafka
     kafka_bootstrap_servers: str = "localhost:9094"
-    kafka_consumer_group: str = "fastapi-app"
+    kafka_consumer_group: str = "documind-worker"
     kafka_auto_offset_reset: str = "earliest"
 
     # Topics

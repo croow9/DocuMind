@@ -2,14 +2,18 @@ from collections.abc import Sequence
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from aiokafka.errors import KafkaError
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ingestion.storage import DATA_DIR, document_file_path
+from app.messaging.producer import KafkaProducerManager
+from app.messaging.topics import IngestionTopics
 from app.models import DocumentORM, UserORM
-from app.models.document import SourceType
+from app.models.document import DocumentStatus, SourceType
 from app.repositories.document_repo import DocumentRepository
 from app.schemas.document import DocumentCreate
+from app.schemas.events import IngestionRequested
 
 ALLOWED_SUFFIXES = {".pdf", ".md", ".markdown", ".txt"}
 
@@ -25,7 +29,7 @@ class DocumentService:
         document = DocumentORM(
             owner_id=user.id,
             title=payload.title,
-            source_type=payload.source_type,
+            source_type=SourceType.URL,
             source_url=str(payload.source_url),
         )
         return await self._create(document)
@@ -73,6 +77,30 @@ class DocumentService:
         document = await self.get(user, document_id)
         await self.repo.delete(document)
         await self.session.commit()
+
+    async def request_indexing(
+        self, document: DocumentORM, producer: KafkaProducerManager
+    ) -> None:
+        """Поставить документ в очередь индексации.
+
+        Если очередь недоступна, документ честно помечается failed: иначе он
+        навсегда остался бы в pending, а воркер о нём так и не узнал.
+        """
+        event = IngestionRequested(document_id=document.id)
+        # ловим только ошибки Kafka: баг в нашем коде не должен выглядеть как
+        # «очередь недоступна»
+        try:
+            await producer.send(IngestionTopics.REQUESTED, event, key=str(document.id))
+        except KafkaError as exc:
+            # сессия БД здесь исправна (ошибка пришла от Kafka), rollback не нужен.
+            # Текст для пользователя без деталей: подробности уже в логе продюсера
+            document.status = DocumentStatus.FAILED
+            document.error = "Очередь индексации недоступна, попробуйте позже"
+            await self.session.commit()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Очередь индексации недоступна, документ сохранён как failed",
+            ) from exc
 
     async def _create(self, document: DocumentORM) -> DocumentORM:
         await self.repo.create(document)

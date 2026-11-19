@@ -1,24 +1,19 @@
 from datetime import datetime
-from typing import Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 from app.models.document import DocumentStatus, SourceType
 
 
 class DocumentCreate(BaseModel):
-    title: str = Field(min_length=1, max_length=512)
-    source_type: SourceType
-    source_url: HttpUrl | None = None
+    """Документ по ссылке. Файлы загружаются отдельным эндпоинтом /upload."""
 
-    @model_validator(mode="after")
-    def validate_source(self) -> Self:
-        if self.source_type is SourceType.URL and self.source_url is None:
-            raise ValueError("source_url is required when source_type is 'url'")
-        if self.source_type is SourceType.UPLOAD and self.source_url is not None:
-            raise ValueError("source_url must not be set when source_type is 'upload'")
-        return self
+    # лишние поля (например, старый source_type) отклоняем, а не молча игнорируем
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=512)
+    source_url: HttpUrl
 
 
 class DocumentRead(BaseModel):

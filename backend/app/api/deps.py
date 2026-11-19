@@ -1,12 +1,13 @@
 from typing import Annotated
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decode_access_token
 from app.db.session import get_db
+from app.messaging.producer import KafkaProducerManager
 from app.models import UserORM
 from app.repositories.user_repo import UserRepository
 
@@ -40,4 +41,9 @@ async def get_current_user(
     return user
 
 
+def get_producer(request: Request) -> KafkaProducerManager:
+    return request.app.state.kafka_producer
+
+
 UserDep = Annotated[UserORM, Depends(get_current_user)]
+ProducerDep = Annotated[KafkaProducerManager, Depends(get_producer)]

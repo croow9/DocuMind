@@ -15,6 +15,7 @@ class KafkaProducerManager:
         producer = AIOKafkaProducer(
             bootstrap_servers=self.bootstrap_servers,
             key_serializer=lambda k: str(k).encode("utf-8") if k is not None else None,
+            request_timeout_ms=5000,
         )
         try:
             await producer.start()
