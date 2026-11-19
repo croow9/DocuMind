@@ -16,7 +16,9 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 COPY app ./app
 
-RUN useradd --create-home appuser
+RUN useradd --create-home appuser \
+    && mkdir -p /app/data \
+    && chown appuser /app/data
 USER appuser
 
 EXPOSE 8000

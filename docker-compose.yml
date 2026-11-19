@@ -2,12 +2,20 @@ services:
   api:
     build: ./backend
     env_file: .env
+    environment:
+      # в .env адрес для запуска на хосте (localhost:9094), внутри docker-сети — kafka:9092
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     ports:
       - "8000:8000"
+    volumes:
+      # загруженные файлы: api кладёт, worker читает — общий том
+      - uploads:/app/data
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      kafka:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -16,6 +24,25 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  worker:
+    # тот же образ, что и у api, другая команда: воркер индексации документов
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    volumes:
+      - uploads:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    # при сбое воркер падает осознанно (сообщение не потеряется) — пусть поднимается
+    restart: unless-stopped
+    # время дорабатывать текущее сообщение после SIGTERM; не успел — переобработается
+    stop_grace_period: 30s
 
   postgres:
     image: pgvector/pgvector:pg17
@@ -86,6 +113,7 @@ volumes:
   pgdata:
   redisdata:
   kafkadata:
+  uploads:
 
 # Фиксированная подсеть: VPN-клиент занимает 172.19.0.0/28 на своём TUN,
 # и при случайной коллизии трафик к контейнерам уходит в туннель
