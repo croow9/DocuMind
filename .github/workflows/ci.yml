@@ -16,6 +16,21 @@ defaults:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # настоящий Postgres с pgvector: на нём проверяем миграции
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -26,3 +41,11 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy app
       - run: uv run pytest -v
+      # миграции применяются с нуля и не расходятся с моделями (alembic check
+      # падает, если автогенерация нашла бы новые изменения)
+      - name: Миграции совпадают с моделями
+        env:
+          DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
