@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 
+    # Модель, которая отвечает на вопросы. Берём не «думающую» (gpt-5*, o*): им
+    # лимит ответа расходуется ещё и на рассуждения, и ответ может оборваться
+    chat_model: str = "gpt-4.1-mini"
+    # Потолок длины ответа в токенах: защита от слишком длинных и дорогих ответов
+    chat_max_tokens: int = 1000
+
     # Kafka
     kafka_bootstrap_servers: str = "localhost:9094"
     kafka_consumer_group: str = "documind-worker"
