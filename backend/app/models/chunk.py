@@ -7,6 +7,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
 
+# Язык полнотекстового поиска. Им считается колонка search_vector, и тем же языком
+# обязаны разбираться вопросы пользователей: иначе формы слов не совпадут
+FTS_CONFIG = "russian"
+
 
 class ChunkORM(Base):
     __tablename__ = "chunks"
@@ -38,11 +42,11 @@ class ChunkORM(Base):
     embedding: Mapped[list[float]] = mapped_column(Vector(1536))
     # Лексемы текста для полнотекстового поиска. Postgres сам пересчитывает колонку
     # при каждой записи content, поэтому в коде её никогда не заполняем. Язык
-    # 'russian' сводит формы слова к основе («индексации» и «индексация» совпадут)
-    # и хуже работает на английском тексте. deferred: в Python колонка не нужна,
-    # по ней ищет только база, и тянуть её с каждым чанком незачем
+    # FTS_CONFIG (russian) сводит формы слова к основе («индексации» и
+    # «индексация» совпадут). deferred: в Python колонка не нужна, по ней ищет
+    # только база, и тянуть её с каждым чанком незачем
     search_vector: Mapped[str] = mapped_column(
         TSVECTOR,
-        Computed("to_tsvector('russian', content)", persisted=True),
+        Computed(f"to_tsvector('{FTS_CONFIG}', content)", persisted=True),
         deferred=True,
     )
