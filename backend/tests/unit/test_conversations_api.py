@@ -6,19 +6,33 @@ from uuid import uuid4
 import pytest
 from starlette.testclient import TestClient
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_web_profiles
 from app.api.v1.conversations import get_chat_service
 from app.main import app
 from app.rag.llm import FakeChat
 from app.rag.prompt import NO_WEB_ANSWER_TEXT
+from app.rag.web_profiles import WebProfile, WebProfiles
 from app.services.chat_service import ChatService
 
 MESSAGE_ID = uuid4()
 
+PROFILES = WebProfiles(
+    [
+        WebProfile(name="backend", title="Backend", domains=("docs.python.org",)),
+        WebProfile(
+            name="analyst",
+            title="Аналитик",
+            description="BPMN и спецификации",
+            domains=("docs.camunda.io", "omg.org"),
+        ),
+    ],
+    default="backend",
+)
+
 
 def make_service(conversation_exists: bool) -> ChatService:
     service = ChatService(
-        AsyncMock(), AsyncMock(), FakeChat(reply="Ответ [1]."), AsyncMock()
+        AsyncMock(), AsyncMock(), FakeChat(reply="Ответ [1]."), AsyncMock(), PROFILES
     )
     service.conversations = AsyncMock()
     service.conversations.get_by_id.return_value = (
@@ -37,6 +51,7 @@ def client_for() -> Iterator[object]:
     def build(service: ChatService) -> TestClient:
         app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=uuid4())
         app.dependency_overrides[get_chat_service] = lambda: service
+        app.dependency_overrides[get_web_profiles] = lambda: PROFILES
         return TestClient(app)
 
     yield build
@@ -136,3 +151,52 @@ def test_web_search_question_is_streamed_from_web_not_from_documents(
     assert response.status_code == 200
     assert NO_WEB_ANSWER_TEXT in response.text
     service.search.search.assert_not_awaited()
+
+
+def test_unknown_web_profile_gives_real_404_not_a_stream(client_for) -> None:  # type: ignore[no-untyped-def]
+    service = make_service(conversation_exists=True)
+    client = client_for(service)
+
+    response = client.post(
+        f"/api/v1/conversations/{uuid4()}/messages",
+        json={"question": "как?", "web_search": True, "web_profile": "nope"},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Профиль не найден"}
+    service.messages.create.assert_not_awaited()
+
+
+def test_web_profile_without_web_search_is_rejected(client_for) -> None:  # type: ignore[no-untyped-def]
+    client = client_for(make_service(conversation_exists=True))
+
+    response = client.post(
+        f"/api/v1/conversations/{uuid4()}/messages",
+        json={"question": "как?", "web_profile": "analyst"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_profiles_endpoint_lists_choices_without_the_domains(client_for) -> None:  # type: ignore[no-untyped-def]
+    client = client_for(make_service(conversation_exists=True))
+
+    response = client.get("/api/v1/web-profiles")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "name": "backend",
+            "title": "Backend",
+            "description": "",
+            "domains_count": 1,
+            "is_default": True,
+        },
+        {
+            "name": "analyst",
+            "title": "Аналитик",
+            "description": "BPMN и спецификации",
+            "domains_count": 2,
+            "is_default": False,
+        },
+    ]

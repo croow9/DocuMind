@@ -31,13 +31,9 @@ class Settings(BaseSettings):
     chat_max_tokens: int = 1000
 
     # Поиск по документации в интернете (включается флагом web_search в запросе).
-    # Ходим только на эти сайты (и их поддомены); пустой список выключает поиск
-    web_allowed_domains: list[str] = [
-        "fastapi.tiangolo.com",
-        "docs.python.org",
-        "docs.pydantic.dev",
-        "docs.sqlalchemy.org",
-    ]
+    # Какие сайты разрешены, описано профилями в app/rag/web_profiles.json; это
+    # профиль, который берётся, если клиент не указал свой
+    web_default_profile: str = "backend"
     # Модель, которая ищет страницы (её встроенный веб-поиск). Не «думающая»:
     # по той же причине, что и chat_model; ограничение по доменам делаем сами
     web_search_model: str = "gpt-4.1-mini"

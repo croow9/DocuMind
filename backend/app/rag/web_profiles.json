@@ -1,0 +1,50 @@
+[
+  {
+    "name": "backend",
+    "title": "Backend-разработка (Python)",
+    "description": "Официальная документация Python и популярных библиотек: FastAPI, Pydantic, SQLAlchemy, Alembic, pytest, Docker, PostgreSQL, Redis, Kafka.",
+    "domains": [
+      "fastapi.tiangolo.com",
+      "docs.python.org",
+      "peps.python.org",
+      "docs.pydantic.dev",
+      "docs.sqlalchemy.org",
+      "alembic.sqlalchemy.org",
+      "docs.pytest.org",
+      "docs.astral.sh",
+      "docs.docker.com",
+      "postgresql.org",
+      "redis.io",
+      "kafka.apache.org"
+    ]
+  },
+  {
+    "name": "analyst",
+    "title": "Системный анализ",
+    "description": "Документация и стандарты для аналитиков: BPMN, UML, OpenAPI, AsyncAPI, JSON Schema, HTTP и RFC, Atlassian, Microsoft, Camunda, облака, базы данных и брокеры сообщений.",
+    "domains": [
+      "learn.microsoft.com",
+      "support.atlassian.com",
+      "confluence.atlassian.com",
+      "developer.atlassian.com",
+      "docs.camunda.io",
+      "bpmn.io",
+      "omg.org",
+      "plantuml.com",
+      "mermaid.js.org",
+      "spec.openapis.org",
+      "swagger.io",
+      "asyncapi.com",
+      "json-schema.org",
+      "developer.mozilla.org",
+      "rfc-editor.org",
+      "datatracker.ietf.org",
+      "w3.org",
+      "docs.aws.amazon.com",
+      "cloud.google.com",
+      "postgresql.org",
+      "kafka.apache.org",
+      "rabbitmq.com"
+    ]
+  }
+]

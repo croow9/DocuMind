@@ -6,11 +6,13 @@ from fastapi import FastAPI
 from app.api.v1.auth import router as auth_router
 from app.api.v1.conversations import router as conversations_router
 from app.api.v1.documents import router as documents_router
+from app.api.v1.web_profiles import router as web_profiles_router
 from app.core.config import settings
 from app.db.session import engine
 from app.ingestion.embedder import build_embedder
 from app.messaging.producer import KafkaProducerManager
 from app.rag.llm import build_chat_client
+from app.rag.web_profiles import load_web_profiles
 from app.services.web_search_service import (
     build_http_client,
     build_web_search_service,
@@ -25,6 +27,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # клиенты OpenAI держат пул соединений: создаём один раз, а не на каждый запрос
     app.state.embedder = build_embedder()
     app.state.chat_client = build_chat_client()
+    # профили читаются и проверяются при запуске: ошибка в файле остановит его сразу
+    app.state.web_profiles = load_web_profiles(settings.web_default_profile)
     http_client = build_http_client()
     app.state.web_search = build_web_search_service(app.state.embedder, http_client)
 
@@ -45,6 +49,7 @@ app = FastAPI(lifespan=lifespan)
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")
 app.include_router(conversations_router, prefix="/api/v1")
+app.include_router(web_profiles_router, prefix="/api/v1")
 
 
 @app.get("/")

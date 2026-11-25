@@ -75,7 +75,7 @@ def test_normalize_url_drops_tracking_query_and_fragment() -> None:
 
 def make_fetcher(handler, **kwargs: int) -> PageFetcher:  # type: ignore[no-untyped-def]
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    return PageFetcher(client, ALLOWED, **kwargs)
+    return PageFetcher(client, **kwargs)
 
 
 async def test_fetch_returns_page_text() -> None:
@@ -84,7 +84,7 @@ async def test_fetch_returns_page_text() -> None:
             200, headers=HTML_HEADERS, content="<p>Привет</p>".encode()
         )
 
-    html = await make_fetcher(handler).fetch("https://fastapi.tiangolo.com/")
+    html = await make_fetcher(handler).fetch("https://fastapi.tiangolo.com/", ALLOWED)
 
     assert html == "<p>Привет</p>"
 
@@ -95,7 +95,9 @@ async def test_fetch_follows_redirect_inside_allowed_domains() -> None:
             return httpx.Response(301, headers={"location": "/new/"})
         return httpx.Response(200, headers=HTML_HEADERS, content="<p>новая</p>")
 
-    html = await make_fetcher(handler).fetch("https://fastapi.tiangolo.com/old/")
+    html = await make_fetcher(handler).fetch(
+        "https://fastapi.tiangolo.com/old/", ALLOWED
+    )
 
     assert html == "<p>новая</p>"
 
@@ -108,7 +110,7 @@ async def test_redirect_to_foreign_host_is_refused_without_connecting() -> None:
         return httpx.Response(302, headers={"location": "https://evil.com/steal"})
 
     with pytest.raises(PageFetchError, match="не из списка"):
-        await make_fetcher(handler).fetch("https://fastapi.tiangolo.com/")
+        await make_fetcher(handler).fetch("https://fastapi.tiangolo.com/", ALLOWED)
 
     # к чужому хосту запроса не было: адрес проверен до соединения
     assert requested == ["fastapi.tiangolo.com"]
@@ -122,7 +124,7 @@ async def test_redirect_loop_stops() -> None:
         return httpx.Response(302, headers={"location": "/again/"})
 
     with pytest.raises(PageFetchError, match="слишком много"):
-        await make_fetcher(handler).fetch("https://fastapi.tiangolo.com/")
+        await make_fetcher(handler).fetch("https://fastapi.tiangolo.com/", ALLOWED)
 
     assert len(calls) == MAX_REDIRECTS + 1
 
@@ -132,7 +134,7 @@ async def test_disallowed_url_makes_no_request_at_all() -> None:
         raise AssertionError("сеть не должна вызываться")
 
     with pytest.raises(PageFetchError, match="не из списка"):
-        await make_fetcher(handler).fetch("http://fastapi.tiangolo.com/")
+        await make_fetcher(handler).fetch("http://fastapi.tiangolo.com/", ALLOWED)
 
 
 @pytest.mark.parametrize(
@@ -158,7 +160,19 @@ async def test_unusable_responses_are_refused(
     fetcher = make_fetcher(lambda request: response, max_bytes=100)
 
     with pytest.raises(PageFetchError, match=reason):
-        await fetcher.fetch("https://fastapi.tiangolo.com/")
+        await fetcher.fetch("https://fastapi.tiangolo.com/", ALLOWED)
+
+
+async def test_allowed_sites_are_chosen_per_call_not_per_fetcher() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers=HTML_HEADERS, content="<p>ок</p>")
+
+    fetcher = make_fetcher(handler)
+
+    assert await fetcher.fetch("https://docs.camunda.io/", ["docs.camunda.io"])
+    # тот же скачиватель, но сайт не из списка этого вызова
+    with pytest.raises(PageFetchError, match="не из списка"):
+        await fetcher.fetch("https://docs.camunda.io/", ALLOWED)
 
 
 async def test_network_failure_becomes_fetch_error() -> None:
@@ -166,7 +180,7 @@ async def test_network_failure_becomes_fetch_error() -> None:
         raise httpx.ConnectError("нет связи")
 
     with pytest.raises(PageFetchError, match="сеть"):
-        await make_fetcher(handler).fetch("https://fastapi.tiangolo.com/")
+        await make_fetcher(handler).fetch("https://fastapi.tiangolo.com/", ALLOWED)
 
 
 # --- html_to_markdown

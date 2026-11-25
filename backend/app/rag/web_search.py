@@ -26,8 +26,13 @@ class PageFinder(ABC):
     """
 
     @abstractmethod
-    async def find(self, question: str, context: Sequence[str] = ()) -> list[str]:
-        """context — прежние вопросы пользователя в этом диалоге, от старых к новым."""
+    async def find(
+        self, question: str, domains: Sequence[str], context: Sequence[str] = ()
+    ) -> list[str]:
+        """domains — сайты профиля, на которых искать.
+
+        context — прежние вопросы пользователя в этом диалоге, от старых к новым.
+        """
         raise NotImplementedError
 
 
@@ -51,14 +56,13 @@ class OpenAIPageFinder(PageFinder):
     потом, в коде.
     """
 
-    def __init__(
-        self, allowed_domains: Sequence[str], client: AsyncOpenAI | None = None
-    ) -> None:
-        self._allowed_domains = list(allowed_domains)
+    def __init__(self, client: AsyncOpenAI | None = None) -> None:
         self._client = client or AsyncOpenAI(api_key=settings.openai_api_key)
 
-    async def find(self, question: str, context: Sequence[str] = ()) -> list[str]:
-        sites = ", ".join(self._allowed_domains)
+    async def find(
+        self, question: str, domains: Sequence[str], context: Sequence[str] = ()
+    ) -> list[str]:
+        sites = ", ".join(domains)
         prompt = question
         if context:
             # короткий вопрос вроде «а как с yield?» без предыдущих непонятен:
@@ -71,11 +75,14 @@ class OpenAIPageFinder(PageFinder):
         response = await self._client.responses.create(
             model=settings.web_search_model,
             instructions=(
-                "Найди в интернете страницы официальной документации, по которым "
-                "можно ответить на вопрос. Ищи только на этих сайтах, "
-                f"используя оператор site: {sites}. Называй в запросе библиотеку и "
-                "предпочитай актуальную версию документации. Отвечать на вопрос "
-                "не нужно: достаточно найти страницы."
+                "Найди в интернете страницы официальной документации или "
+                "стандартов, по которым можно ответить на вопрос. Ищи только на "
+                f"этих сайтах: {sites}. Выбери один-два самых подходящих по теме "
+                "вопроса и ищи на них оператором site:, а не на всех сразу. "
+                "Называй в запросе продукт, технологию или стандарт, лучше по-"
+                "английски: документация в основном на нём. Предпочитай "
+                "актуальную версию. Отвечать на вопрос не нужно: достаточно "
+                "найти страницы."
             ),
             input=prompt,
             tools=[_WEB_SEARCH_TOOL],
@@ -112,10 +119,14 @@ class FakePageFinder(PageFinder):
     def __init__(self, urls: Sequence[str] = ()) -> None:
         self._urls = list(urls)
         self.questions: list[str] = []
+        self.domains: list[list[str]] = []
         self.contexts: list[list[str]] = []
 
-    async def find(self, question: str, context: Sequence[str] = ()) -> list[str]:
+    async def find(
+        self, question: str, domains: Sequence[str], context: Sequence[str] = ()
+    ) -> list[str]:
         self.questions.append(question)
+        self.domains.append(list(domains))
         self.contexts.append(list(context))
         return list(self._urls)
 
@@ -123,5 +134,5 @@ class FakePageFinder(PageFinder):
 def build_page_finder() -> PageFinder:
     """Настоящий поиск при наличии ключа OpenAI, пустой фейк без него."""
     if settings.openai_api_key:
-        return OpenAIPageFinder(settings.web_allowed_domains)
+        return OpenAIPageFinder()
     return FakePageFinder()

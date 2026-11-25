@@ -33,7 +33,7 @@ def make_finder(*output: SimpleNamespace) -> tuple[OpenAIPageFinder, AsyncMock]:
     client.responses.create = AsyncMock(
         return_value=SimpleNamespace(output=list(output))
     )
-    return OpenAIPageFinder(DOMAINS, client=client), client.responses.create
+    return OpenAIPageFinder(client=client), client.responses.create
 
 
 async def test_cited_pages_come_first_then_the_rest_without_repeats_and_tracking() -> (
@@ -49,7 +49,7 @@ async def test_cited_pages_come_first_then_the_rest_without_repeats_and_tracking
         message("https://fastapi.tiangolo.com/c/?utm_source=openai"),
     )
 
-    urls = await finder.find("как?")
+    urls = await finder.find("как?", DOMAINS)
 
     assert urls == [
         "https://fastapi.tiangolo.com/c/",  # процитирована — значит, важнее
@@ -65,13 +65,13 @@ async def test_actions_without_sources_are_ignored() -> None:
     )
     finder, _ = make_finder(open_page, search_call("https://docs.python.org/3/"))
 
-    assert await finder.find("как?") == ["https://docs.python.org/3/"]
+    assert await finder.find("как?", DOMAINS) == ["https://docs.python.org/3/"]
 
 
 async def test_request_forces_search_and_names_the_sites() -> None:
     finder, create = make_finder(search_call())
 
-    await finder.find("Как объявить зависимость?")
+    await finder.find("Как объявить зависимость?", DOMAINS)
 
     kwargs = create.await_args.kwargs
     assert kwargs["input"] == "Как объявить зависимость?"
@@ -87,7 +87,7 @@ async def test_request_forces_search_and_names_the_sites() -> None:
 async def test_fake_finder_returns_given_urls_and_remembers_questions() -> None:
     finder = FakePageFinder(["https://docs.python.org/3/"])
 
-    assert await finder.find("как?") == ["https://docs.python.org/3/"]
+    assert await finder.find("как?", DOMAINS) == ["https://docs.python.org/3/"]
     assert finder.questions == ["как?"]
 
 
@@ -102,7 +102,7 @@ def test_finder_is_chosen_by_key_presence(monkeypatch) -> None:  # type: ignore[
 async def test_previous_questions_are_given_to_the_search_model_as_context() -> None:
     finder, create = make_finder(search_call())
 
-    await finder.find("А как с yield?", ["Как объявить Depends в FastAPI?"])
+    await finder.find("А как с yield?", DOMAINS, ["Как объявить Depends в FastAPI?"])
 
     prompt = create.await_args.kwargs["input"]
     assert "Как объявить Depends в FastAPI?" in prompt

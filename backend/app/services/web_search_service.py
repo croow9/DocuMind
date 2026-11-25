@@ -17,6 +17,7 @@ from app.ingestion.web_pages import (
     is_allowed_url,
 )
 from app.rag.retrieval import TOP_K, top_by_similarity
+from app.rag.web_profiles import WebProfile
 from app.rag.web_search import PageFinder, build_page_finder
 from app.schemas.search import RetrievedChunk
 
@@ -80,7 +81,7 @@ class _Fragment:
 class WebSearchService:
     """Ответ на «источники» из документации в интернете.
 
-    Поиск находит адреса, мы их фильтруем по списку сайтов, скачиваем, режем на
+    Поиск находит адреса, мы их фильтруем по сайтам профиля, скачиваем, режем на
     куски и выбираем ближайшие к вопросу по смыслу. На выходе те же
     RetrievedChunk, что и у поиска по своим документам, поэтому промпт, сноски
     и сохранение цитат работают без изменений.
@@ -91,26 +92,33 @@ class WebSearchService:
         finder: PageFinder,
         fetcher: PageFetcher,
         embedder: EmbeddingClient,
-        allowed_domains: Sequence[str],
         max_pages: int,
     ) -> None:
         self.finder = finder
         self.fetcher = fetcher
         self.embedder = embedder
-        self.allowed_domains = list(allowed_domains)
         self.max_pages = max_pages
 
     async def search(
-        self, question: str, top_k: int = TOP_K, context: Sequence[str] = ()
+        self,
+        question: str,
+        profile: WebProfile,
+        top_k: int = TOP_K,
+        context: Sequence[str] = (),
     ) -> list[RetrievedChunk]:
-        """context — прежние вопросы диалога: без них «а как с yield?» нечем искать."""
-        # пустой список сайтов — способ выключить функцию: искать негде
-        if not question.strip() or not self.allowed_domains:
+        """Источники из документации сайтов профиля.
+
+        context — прежние вопросы диалога: без них «а как с yield?» нечем искать.
+        """
+        if not question.strip():
             return []
 
-        urls = self._pick_urls(await self.finder.find(question, context))
+        found = await self.finder.find(question, profile.domains, context)
+        urls = self._pick_urls(found, profile.domains)
         # страницы качаются одновременно: это сеть, а не общая сессия БД
-        pages = await asyncio.gather(*(self._load_page(url) for url in urls))
+        pages = await asyncio.gather(
+            *(self._load_page(url, profile.domains) for url in urls)
+        )
         fragments = [fragment for page in pages for fragment in page]
         if not fragments:
             return []
@@ -132,7 +140,7 @@ class WebSearchService:
             for i in best
         ]
 
-    def _pick_urls(self, found: Sequence[str]) -> list[str]:
+    def _pick_urls(self, found: Sequence[str], domains: Sequence[str]) -> list[str]:
         """Адреса с разрешённых сайтов, без повторов, не больше max_pages.
 
         Это главная проверка: поисковику (то есть модели с доступом к
@@ -140,11 +148,7 @@ class WebSearchService:
         здесь, и качать будем только отобранное. Он и правда выходит за рамки:
         на вопрос не про документацию возвращает совсем другие сайты.
         """
-        allowed = [
-            url
-            for url in dict.fromkeys(found)
-            if is_allowed_url(url, self.allowed_domains)
-        ]
+        allowed = [url for url in dict.fromkeys(found) if is_allowed_url(url, domains)]
         # сортировка устойчивая: при равных оценках порядок поиска сохраняется
         allowed.sort(key=_url_penalty)
         # одна страница в трёх версиях заняла бы три места из нескольких: берём
@@ -154,10 +158,10 @@ class WebSearchService:
             unique.setdefault(_page_identity(url), url)
         return list(unique.values())[: self.max_pages]
 
-    async def _load_page(self, url: str) -> list[_Fragment]:
+    async def _load_page(self, url: str, domains: Sequence[str]) -> list[_Fragment]:
         """Куски одной страницы; недоступная страница не ломает остальные."""
         try:
-            html = await self.fetcher.fetch(url)
+            html = await self.fetcher.fetch(url, domains)
         except PageFetchError as exc:
             logger.warning("Страница %s пропущена: %s", url, exc)
             return []
@@ -171,9 +175,8 @@ def build_web_search_service(
 ) -> WebSearchService:
     return WebSearchService(
         finder=build_page_finder(),
-        fetcher=PageFetcher(http_client, settings.web_allowed_domains),
+        fetcher=PageFetcher(http_client),
         embedder=embedder,
-        allowed_domains=settings.web_allowed_domains,
         max_pages=settings.web_max_pages,
     )
 

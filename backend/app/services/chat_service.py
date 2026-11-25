@@ -19,6 +19,7 @@ from app.rag.prompt import (
     build_messages,
     extract_citation_numbers,
 )
+from app.rag.web_profiles import WebProfile, WebProfiles
 from app.repositories.conversation_repo import ConversationRepository
 from app.repositories.document_repo import DocumentRepository
 from app.repositories.message_repo import MessageRepository
@@ -60,6 +61,7 @@ class ChatService:
         search: SearchService,
         chat: ChatClient,
         web: WebSearchService,
+        profiles: WebProfiles,
         session_factory: async_sessionmaker[AsyncSession] = AsyncSessionLocal,
     ) -> None:
         self.session = session
@@ -69,6 +71,7 @@ class ChatService:
         self.search = search
         self.chat = chat
         self.web = web
+        self.profiles = profiles
         # ответ сохраняется в собственной короткой сессии (см. _save_answer)
         self.session_factory = session_factory
 
@@ -87,6 +90,10 @@ class ChatService:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Диалог не найден"
             )
+
+        if payload.web_search:
+            # неизвестный профиль — такая же ошибка клиента, как чужой документ
+            self._web_profile(payload)
 
         if payload.document_ids is not None:
             owned = await self.documents.get_owned_ids(payload.document_ids, owner_id)
@@ -112,6 +119,14 @@ class ChatService:
             for message in history
         ]
 
+    def _web_profile(self, payload: MessageCreate) -> WebProfile:
+        profile = self.profiles.get(payload.web_profile)
+        if profile is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Профиль не найден"
+            )
+        return profile
+
     async def answer(
         self,
         owner_id: UUID,
@@ -131,7 +146,9 @@ class ChatService:
                 # поиску нужны прежние вопросы, чтобы понять короткое уточнение
                 previous = [m.content for m in history if m.role == "user"]
                 sources = await self.web.search(
-                    payload.question, context=previous[-MAX_WEB_CONTEXT_QUESTIONS:]
+                    payload.question,
+                    self._web_profile(payload),
+                    context=previous[-MAX_WEB_CONTEXT_QUESTIONS:],
                 )
             else:
                 sources = await self.search.search(

@@ -10,6 +10,7 @@ from app.api.deps import (
     EmbedderDep,
     SessionDep,
     UserDep,
+    WebProfilesDep,
     WebSearchDep,
 )
 from app.rag.llm import ChatMessage
@@ -65,9 +66,13 @@ async def delete_conversation(
 
 
 def get_chat_service(
-    db: SessionDep, embedder: EmbedderDep, chat: ChatClientDep, web: WebSearchDep
+    db: SessionDep,
+    embedder: EmbedderDep,
+    chat: ChatClientDep,
+    web: WebSearchDep,
+    profiles: WebProfilesDep,
 ) -> ChatService:
-    return ChatService(db, SearchService(db, embedder), chat, web)
+    return ChatService(db, SearchService(db, embedder), chat, web, profiles)
 
 
 ChatServiceDep = Annotated[ChatService, Depends(get_chat_service)]
@@ -105,9 +110,10 @@ async def send_message(
     затем `done` (id сообщения и номера использованных источников) или `error`.
 
     По умолчанию ищет в документах пользователя. С `web_search: true` ищет в
-    официальной документации из интернета (список сайтов задан в настройках):
-    у таких источников вместо id документа и чанка приходит `url`. Вместе с
-    `document_ids` флаг не принимается.
+    официальной документации из интернета: у таких источников вместо id документа
+    и чанка приходит `url`. Набор сайтов выбирается полем `web_profile` (список:
+    `GET /web-profiles`), без него берётся профиль по умолчанию; неизвестный
+    профиль даёт 404. Вместе с `document_ids` флаг не принимается.
     """
     async for event in service.answer(user.id, conversation_id, payload, history):
         yield event

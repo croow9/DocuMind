@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock
 
 from app.ingestion.embedder import EmbeddingClient
 from app.ingestion.web_pages import PageFetchError
+from app.rag.web_profiles import WebProfile
 from app.rag.web_search import FakePageFinder
 from app.services.web_search_service import (
     MAX_CHUNKS_PER_PAGE,
@@ -10,6 +11,8 @@ from app.services.web_search_service import (
 )
 
 DOMAINS = ["fastapi.tiangolo.com"]
+PROFILE = WebProfile(name="backend", title="Backend", domains=tuple(DOMAINS))
+PYTHON_PROFILE = WebProfile(name="python", title="Python", domains=("docs.python.org",))
 GOOD = "https://fastapi.tiangolo.com/tutorial/dependencies/"
 OTHER = "https://fastapi.tiangolo.com/tutorial/security/"
 EVIL = "https://evil.com/fastapi.tiangolo.com"
@@ -42,7 +45,7 @@ def make_service(
     finder = FakePageFinder(found)
     fetcher = AsyncMock()
 
-    async def fetch(url: str) -> str:
+    async def fetch(url: str, domains: list[str]) -> str:
         result = pages[url]
         if isinstance(result, Exception):
             raise result
@@ -50,7 +53,7 @@ def make_service(
 
     fetcher.fetch.side_effect = fetch
     service = WebSearchService(
-        finder, fetcher, embedder or VectorEmbedder({}), DOMAINS, max_pages
+        finder, fetcher, embedder or VectorEmbedder({}), max_pages
     )
     return service, finder, fetcher.fetch
 
@@ -67,7 +70,7 @@ async def test_only_allowed_unique_urls_are_downloaded_up_to_the_limit() -> None
         max_pages=2,
     )
 
-    await service.search("вопрос")
+    await service.search("вопрос", PROFILE)
 
     # чужой сайт отброшен, повтор склеен, лишнее сверх лимита не качается
     assert [call.args[0] for call in fetch.await_args_list] == [GOOD, OTHER]
@@ -90,7 +93,7 @@ async def test_nearest_fragments_win_and_carry_page_title_path_and_url() -> None
         embedder=embedder,
     )
 
-    [best] = await service.search("вопрос", top_k=1)
+    [best] = await service.search("вопрос", PROFILE, top_k=1)
 
     assert best.content == "про зависимости"
     assert best.document_title == "Зависимости"
@@ -105,7 +108,7 @@ async def test_question_and_all_fragments_are_embedded_in_one_request() -> None:
         {GOOD: page("A", x="раз", y="два")}, found=[GOOD], embedder=embedder
     )
 
-    await service.search("вопрос")
+    await service.search("вопрос", PROFILE)
 
     assert embedder.calls == [["вопрос", "раз", "два"]]
 
@@ -116,7 +119,7 @@ async def test_broken_page_is_skipped_and_the_rest_is_used() -> None:
         found=[GOOD, OTHER],
     )
 
-    results = await service.search("вопрос")
+    results = await service.search("вопрос", PROFILE)
 
     assert [r.url for r in results] == [OTHER]
 
@@ -127,18 +130,34 @@ async def test_no_pages_means_no_sources_and_no_embedding_call() -> None:
         {GOOD: PageFetchError("HTTP 404")}, found=[GOOD, EVIL], embedder=embedder
     )
 
-    assert await service.search("вопрос") == []
+    assert await service.search("вопрос", PROFILE) == []
     assert embedder.calls == []
 
 
-async def test_blank_question_or_empty_allowlist_does_not_even_search() -> None:
+async def test_blank_question_does_not_even_search() -> None:
     service, finder, _ = make_service({}, found=[GOOD])
 
-    assert await service.search("   ") == []
-
-    service.allowed_domains = []
-    assert await service.search("вопрос") == []
+    assert await service.search("   ", PROFILE) == []
     assert finder.questions == []
+
+
+async def test_finder_and_fetcher_get_the_domains_of_the_chosen_profile() -> None:
+    service, finder, fetch = make_service({GOOD: page("A", s="текст")}, found=[GOOD])
+
+    await service.search("вопрос", PROFILE)
+
+    assert finder.domains == [DOMAINS]
+    assert fetch.await_args.args == (GOOD, PROFILE.domains)
+
+
+async def test_the_same_found_url_is_dropped_when_the_profile_does_not_allow_it() -> (
+    None
+):
+    service, _, fetch = make_service({GOOD: page("A", s="текст")}, found=[GOOD])
+
+    # страница с сайта из профиля backend, но спрашивали по профилю python
+    assert await service.search("вопрос", PYTHON_PROFILE) == []
+    fetch.assert_not_awaited()
 
 
 async def test_huge_page_is_cut_to_the_chunk_limit() -> None:
@@ -148,7 +167,7 @@ async def test_huge_page_is_cut_to_the_chunk_limit() -> None:
         {GOOD: page("Справочник", **sections)}, [GOOD], embedder
     )
 
-    await service.search("вопрос")
+    await service.search("вопрос", PROFILE)
 
     # вопрос + не больше MAX_CHUNKS_PER_PAGE кусков
     assert len(embedder.calls[0]) == 1 + MAX_CHUNKS_PER_PAGE
@@ -169,12 +188,11 @@ async def test_pages_in_preferred_languages_and_current_version_are_downloaded_f
         FakePageFinder(list(urls.values())),
         fetch := AsyncMock(),
         VectorEmbedder({}),
-        ["docs.python.org"],
         max_pages=3,
     )
     fetch.fetch.return_value = page("asyncio", s="текст")
 
-    await service.search("вопрос")
+    await service.search("вопрос", PYTHON_PROFILE)
 
     fetched = [call.args[0] for call in fetch.fetch.await_args_list]
     # впереди «нужный язык, актуальная версия»; закреплённая версия хуже,
@@ -186,7 +204,7 @@ async def test_foreign_language_page_is_still_used_when_nothing_better_exists() 
     ja = "https://fastapi.tiangolo.com/ja/tutorial/"
     service, _, fetch = make_service({ja: page("Страница", s="текст")}, found=[ja])
 
-    results = await service.search("вопрос")
+    results = await service.search("вопрос", PROFILE)
 
     assert [r.url for r in results] == [ja]
 
@@ -209,12 +227,11 @@ async def test_translations_and_versions_of_one_page_take_one_place() -> None:
         FakePageFinder(found),
         fetch := AsyncMock(),
         VectorEmbedder({}),
-        ["docs.python.org"],
         max_pages=4,
     )
     fetch.fetch.return_value = page("asyncio", s="текст")
 
-    await service.search("вопрос")
+    await service.search("вопрос", PYTHON_PROFILE)
 
     # из трёх вариантов одной страницы взят лучший (/3/), место осталось другой
     assert [call.args[0] for call in fetch.fetch.await_args_list] == [
@@ -226,7 +243,9 @@ async def test_translations_and_versions_of_one_page_take_one_place() -> None:
 async def test_previous_questions_are_passed_to_the_finder() -> None:
     service, finder, _ = make_service({GOOD: page("A", s="текст")}, found=[GOOD])
 
-    await service.search("а как с yield?", context=["как объявить Depends в FastAPI?"])
+    await service.search(
+        "а как с yield?", PROFILE, context=["как объявить Depends в FastAPI?"]
+    )
 
     assert finder.questions == ["а как с yield?"]
     assert finder.contexts == [["как объявить Depends в FastAPI?"]]

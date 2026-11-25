@@ -28,14 +28,22 @@ class MessageCreate(BaseModel):
         default=None, min_length=1, max_length=MAX_DOCUMENT_IDS
     )
     # True: искать не в своих документах, а в официальной документации из
-    # интернета (список сайтов задан в настройках). Платная операция, поэтому
-    # включается только явно
+    # интернета. Платная операция, поэтому включается только явно
     web_search: bool = False
+    # Набор сайтов для поиска в интернете (список: GET /web-profiles); без него
+    # берётся профиль по умолчанию
+    web_profile: str | None = Field(default=None, min_length=1, max_length=64)
 
     @model_validator(mode="after")
     def _web_search_excludes_document_ids(self) -> Self:
         if self.web_search and self.document_ids is not None:
             raise ValueError("web_search нельзя сочетать с document_ids")
+        return self
+
+    @model_validator(mode="after")
+    def _web_profile_needs_web_search(self) -> Self:
+        if self.web_profile is not None and not self.web_search:
+            raise ValueError("web_profile имеет смысл только вместе с web_search")
         return self
 
 
@@ -68,6 +76,18 @@ class ErrorData(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     detail: str
+
+
+# --- профили сайтов для поиска в интернете
+
+
+class WebProfileRead(BaseModel):
+    name: str
+    title: str
+    description: str
+    # сами домены не отдаём: клиенту нужно выбрать направление, а не читать список
+    domains_count: int
+    is_default: bool
 
 
 # --- диалоги и их история

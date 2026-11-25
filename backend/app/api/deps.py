@@ -11,6 +11,7 @@ from app.ingestion.embedder import EmbeddingClient
 from app.messaging.producer import KafkaProducerManager
 from app.models import UserORM
 from app.rag.llm import ChatClient
+from app.rag.web_profiles import WebProfiles
 from app.repositories.user_repo import UserRepository
 from app.services.web_search_service import WebSearchService
 
@@ -60,8 +61,13 @@ def get_web_search(request: Request) -> WebSearchService:
     return request.app.state.web_search
 
 
+def get_web_profiles(request: Request) -> WebProfiles:
+    return request.app.state.web_profiles
+
+
 UserDep = Annotated[UserORM, Depends(get_current_user)]
 ProducerDep = Annotated[KafkaProducerManager, Depends(get_producer)]
 EmbedderDep = Annotated[EmbeddingClient, Depends(get_embedder)]
 ChatClientDep = Annotated[ChatClient, Depends(get_chat_client)]
 WebSearchDep = Annotated[WebSearchService, Depends(get_web_search)]
+WebProfilesDep = Annotated[WebProfiles, Depends(get_web_profiles)]

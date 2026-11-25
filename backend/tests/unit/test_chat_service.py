@@ -11,6 +11,7 @@ from app.models import MessageORM
 from app.models.message import MessageRole
 from app.rag.llm import ChatClient, ChatMessage, FakeChat
 from app.rag.prompt import NO_ANSWER_TEXT, NO_WEB_ANSWER_TEXT, WEB_SYSTEM_PROMPT
+from app.rag.web_profiles import WebProfile, WebProfiles
 from app.schemas.chat import DEFAULT_CONVERSATION_TITLE, MessageCreate
 from app.schemas.search import RetrievedChunk
 from app.services.chat_service import ChatService, title_from_question
@@ -18,6 +19,10 @@ from app.services.chat_service import ChatService, title_from_question
 OWNER_ID = uuid4()
 CONVERSATION_ID = uuid4()
 MESSAGE_ID = uuid4()
+
+BACKEND = WebProfile(name="backend", title="Backend", domains=("fastapi.tiangolo.com",))
+ANALYST = WebProfile(name="analyst", title="Аналитик", domains=("docs.camunda.io",))
+PROFILES = WebProfiles([BACKEND, ANALYST], default="backend")
 
 
 def make_chunk(content: str = "текст источника") -> RetrievedChunk:
@@ -37,7 +42,7 @@ def make_service(
     session = AsyncMock()
     search = AsyncMock()
     search.search.return_value = sources
-    service = ChatService(session, search, chat, AsyncMock())
+    service = ChatService(session, search, chat, AsyncMock(), PROFILES)
     save = AsyncMock(return_value=MESSAGE_ID)
     service._save_answer = save  # type: ignore[method-assign]
     return service, session, save
@@ -184,7 +189,7 @@ async def test_client_disconnect_closes_llm_stream_and_saves_nothing() -> None:
 def make_prepare_service(
     conversation_exists: bool = True, title: str = "Свой заголовок"
 ) -> ChatService:
-    service = ChatService(AsyncMock(), AsyncMock(), FakeChat(), AsyncMock())
+    service = ChatService(AsyncMock(), AsyncMock(), FakeChat(), AsyncMock(), PROFILES)
     service.conversations = AsyncMock()
     service.conversations.get_by_id.return_value = (
         SimpleNamespace(id=CONVERSATION_ID, title=title)
@@ -222,6 +227,34 @@ async def test_prepare_foreign_document_is_404_before_saving_question() -> None:
 
     assert exc_info.value.status_code == 404
     service.messages.create.assert_not_awaited()
+
+
+async def test_prepare_unknown_web_profile_is_404_before_saving_question() -> None:
+    service = make_prepare_service()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await service.prepare(
+            OWNER_ID,
+            CONVERSATION_ID,
+            MessageCreate(question="как?", web_search=True, web_profile="nope"),
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "Профиль не найден"
+    service.messages.create.assert_not_awaited()
+
+
+async def test_prepare_accepts_known_and_omitted_web_profile() -> None:
+    service = make_prepare_service()
+
+    for name in ("analyst", None):
+        await service.prepare(
+            OWNER_ID,
+            CONVERSATION_ID,
+            MessageCreate(question="как?", web_search=True, web_profile=name),
+        )
+
+    assert service.messages.create.await_count == 2
 
 
 async def test_prepare_returns_history_read_before_the_question_is_saved() -> None:
@@ -332,7 +365,7 @@ async def test_web_search_answers_from_web_sources_not_from_own_documents() -> N
 
     events = await collect_web(service)
 
-    service.web.search.assert_awaited_once_with("как?", context=[])
+    service.web.search.assert_awaited_once_with("как?", BACKEND, context=[])
     service.search.search.assert_not_awaited()
     source = events[0].data[0]
     assert (source.url, source.chunk_id, source.document_id) == (WEB_URL, None, None)
@@ -342,6 +375,16 @@ async def test_web_search_answers_from_web_sources_not_from_own_documents() -> N
     )
     # модель получила правила для документации из интернета, а не для своих документов
     assert chat.received[0][0].content == WEB_SYSTEM_PROMPT
+
+
+async def test_web_search_uses_the_profile_from_the_request() -> None:
+    service, _, _ = make_service(FakeChat(), [])
+    service.web.search.return_value = []
+    payload = MessageCreate(question="как?", web_search=True, web_profile="analyst")
+
+    [event async for event in service.answer(OWNER_ID, CONVERSATION_ID, payload, [])]
+
+    service.web.search.assert_awaited_once_with("как?", ANALYST, context=[])
 
 
 async def test_own_documents_search_never_touches_the_web() -> None:
@@ -389,7 +432,12 @@ def make_store_service(
     factory = MagicMock()
     factory.return_value.__aenter__.return_value = AsyncMock()
     service = ChatService(
-        AsyncMock(), AsyncMock(), FakeChat(), AsyncMock(), session_factory=factory
+        AsyncMock(),
+        AsyncMock(),
+        FakeChat(),
+        AsyncMock(),
+        PROFILES,
+        session_factory=factory,
     )
     return service, repo
 
@@ -447,5 +495,5 @@ async def test_web_search_gets_only_users_previous_questions_as_context() -> Non
 
     # реплики модели не берём, и не больше двух последних вопросов
     service.web.search.assert_awaited_once_with(
-        "уточнение", context=["второй вопрос", "третий вопрос"]
+        "уточнение", BACKEND, context=["второй вопрос", "третий вопрос"]
     )

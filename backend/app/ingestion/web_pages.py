@@ -60,22 +60,22 @@ class PageFetcher:
     """
 
     def __init__(
-        self,
-        client: httpx.AsyncClient,
-        allowed_domains: Sequence[str],
-        max_bytes: int = MAX_PAGE_BYTES,
+        self, client: httpx.AsyncClient, max_bytes: int = MAX_PAGE_BYTES
     ) -> None:
         self._client = client
-        self._allowed_domains = list(allowed_domains)
         self._max_bytes = max_bytes
 
-    async def fetch(self, url: str) -> str:
-        """Текст страницы (HTML) или PageFetchError с причиной."""
+    async def fetch(self, url: str, allowed_domains: Sequence[str]) -> str:
+        """Текст страницы (HTML) или PageFetchError с причиной.
+
+        Список сайтов передаётся при каждом вызове: у разных профилей он разный,
+        а скачиватель один на всё приложение.
+        """
         current = url
         for _ in range(MAX_REDIRECTS + 1):
             # проверяем каждый адрес в цепочке, а не только первый: разрешённый
             # сайт мог бы перенаправить нас на любой другой
-            if not is_allowed_url(current, self._allowed_domains):
+            if not is_allowed_url(current, allowed_domains):
                 raise PageFetchError(f"адрес не из списка разрешённых: {current}")
             try:
                 # follow_redirects=False: переходы ведём сами, с проверкой выше
