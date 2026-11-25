@@ -11,6 +11,10 @@ from app.db.session import engine
 from app.ingestion.embedder import build_embedder
 from app.messaging.producer import KafkaProducerManager
 from app.rag.llm import build_chat_client
+from app.services.web_search_service import (
+    build_http_client,
+    build_web_search_service,
+)
 
 
 @asynccontextmanager
@@ -21,6 +25,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # клиенты OpenAI держат пул соединений: создаём один раз, а не на каждый запрос
     app.state.embedder = build_embedder()
     app.state.chat_client = build_chat_client()
+    http_client = build_http_client()
+    app.state.web_search = build_web_search_service(app.state.embedder, http_client)
 
     try:
         yield
@@ -28,7 +34,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             await producer.stop()
         finally:
-            await engine.dispose()
+            try:
+                await http_client.aclose()
+            finally:
+                await engine.dispose()
 
 
 app = FastAPI(lifespan=lifespan)

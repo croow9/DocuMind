@@ -15,19 +15,42 @@ from app.rag.llm import ChatClient, ChatMessage
 from app.rag.prompt import (
     MAX_HISTORY_MESSAGES,
     NO_ANSWER_TEXT,
+    NO_WEB_ANSWER_TEXT,
     build_messages,
     extract_citation_numbers,
 )
 from app.repositories.conversation_repo import ConversationRepository
 from app.repositories.document_repo import DocumentRepository
 from app.repositories.message_repo import MessageRepository
-from app.schemas.chat import DoneData, ErrorData, MessageCreate, SourceRead, TokenData
+from app.schemas.chat import (
+    DEFAULT_CONVERSATION_TITLE,
+    DoneData,
+    ErrorData,
+    MessageCreate,
+    SourceRead,
+    TokenData,
+)
 from app.schemas.search import RetrievedChunk
 from app.services.search_service import SearchService
+from app.services.web_search_service import WebSearchService
 
 logger = logging.getLogger(__name__)
 
 STREAM_ERROR_TEXT = "Не удалось получить ответ. Попробуйте задать вопрос ещё раз."
+
+# Сколько прежних вопросов диалога отдаём поиску по интернету как контекст
+MAX_WEB_CONTEXT_QUESTIONS = 2
+
+# Длина заголовка диалога, названного по первому вопросу
+AUTO_TITLE_LENGTH = 60
+
+
+def title_from_question(question: str) -> str:
+    """Заголовок диалога из вопроса: в одну строку и не длиннее AUTO_TITLE_LENGTH."""
+    text = " ".join(question.split())
+    if len(text) <= AUTO_TITLE_LENGTH:
+        return text
+    return text[: AUTO_TITLE_LENGTH - 1].rstrip() + "…"
 
 
 class ChatService:
@@ -36,6 +59,7 @@ class ChatService:
         session: AsyncSession,
         search: SearchService,
         chat: ChatClient,
+        web: WebSearchService,
         session_factory: async_sessionmaker[AsyncSession] = AsyncSessionLocal,
     ) -> None:
         self.session = session
@@ -44,6 +68,7 @@ class ChatService:
         self.documents = DocumentRepository(session)
         self.search = search
         self.chat = chat
+        self.web = web
         # ответ сохраняется в собственной короткой сессии (см. _save_answer)
         self.session_factory = session_factory
 
@@ -76,6 +101,10 @@ class ChatService:
             conversation.id, MAX_HISTORY_MESSAGES
         )
         await self.messages.create(conversation.id, MessageRole.USER, payload.question)
+        if not history and conversation.title == DEFAULT_CONVERSATION_TITLE:
+            # первый вопрос диалога без своего заголовка: называем диалог по нему,
+            # иначе в списке диалогов все они выглядели бы одинаково
+            conversation.title = title_from_question(payload.question)
         # вопрос сохраняется сразу: он не пропадёт, даже если ответ не получится
         await self.session.commit()
         return [
@@ -98,9 +127,16 @@ class ChatService:
         неполный ответ не сохраняется.
         """
         try:
-            sources = await self.search.search(
-                owner_id, payload.question, payload.document_ids
-            )
+            if payload.web_search:
+                # поиску нужны прежние вопросы, чтобы понять короткое уточнение
+                previous = [m.content for m in history if m.role == "user"]
+                sources = await self.web.search(
+                    payload.question, context=previous[-MAX_WEB_CONTEXT_QUESTIONS:]
+                )
+            else:
+                sources = await self.search.search(
+                    owner_id, payload.question, payload.document_ids
+                )
             # Сессия запроса живёт до конца потока и держит соединение с БД.
             # Дальше мы только ждём LLM, поэтому отдаём соединение обратно
             await self.session.close()
@@ -115,7 +151,9 @@ class ChatService:
 
             parts: list[str] = []
             if sources:
-                messages = build_messages(payload.question, sources, history)
+                messages = build_messages(
+                    payload.question, sources, history, web=payload.web_search
+                )
                 # aclosing: если читатель ушёл, поток LLM закрывается сразу,
                 # а не когда до него доберётся сборщик мусора
                 async with aclosing(self.chat.stream(messages)) as stream:
@@ -124,10 +162,9 @@ class ChatService:
                         yield ServerSentEvent(event="token", data=TokenData(text=piece))
             else:
                 # искать нечего: LLM не зовём, это дешевле и без выдумок
-                parts.append(NO_ANSWER_TEXT)
-                yield ServerSentEvent(
-                    event="token", data=TokenData(text=NO_ANSWER_TEXT)
-                )
+                no_answer = NO_WEB_ANSWER_TEXT if payload.web_search else NO_ANSWER_TEXT
+                parts.append(no_answer)
+                yield ServerSentEvent(event="token", data=TokenData(text=no_answer))
 
             answer = "".join(parts)
             if not answer.strip():
@@ -195,6 +232,9 @@ class ChatService:
                         if keep_links
                         else None,
                         chunk_id=sources[number - 1].chunk_id if keep_links else None,
+                        # адрес страницы не ссылка на строку БД: внешнего ключа нет,
+                        # и он остаётся даже в запасном сохранении без ссылок
+                        url=sources[number - 1].url,
                     )
                     for number in numbers
                 ]

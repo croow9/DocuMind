@@ -30,6 +30,21 @@ class Settings(BaseSettings):
     # Потолок длины ответа в токенах: защита от слишком длинных и дорогих ответов
     chat_max_tokens: int = 1000
 
+    # Поиск по документации в интернете (включается флагом web_search в запросе).
+    # Ходим только на эти сайты (и их поддомены); пустой список выключает поиск
+    web_allowed_domains: list[str] = [
+        "fastapi.tiangolo.com",
+        "docs.python.org",
+        "docs.pydantic.dev",
+        "docs.sqlalchemy.org",
+    ]
+    # Модель, которая ищет страницы (её встроенный веб-поиск). Не «думающая»:
+    # по той же причине, что и chat_model; ограничение по доменам делаем сами
+    web_search_model: str = "gpt-4.1-mini"
+    # Сколько страниц скачиваем на один вопрос
+    web_max_pages: int = 4
+    web_fetch_timeout_seconds: float = 10.0
+
     # Kafka
     kafka_bootstrap_servers: str = "localhost:9094"
     kafka_consumer_group: str = "documind-worker"

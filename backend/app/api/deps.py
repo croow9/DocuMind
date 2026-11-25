@@ -12,6 +12,7 @@ from app.messaging.producer import KafkaProducerManager
 from app.models import UserORM
 from app.rag.llm import ChatClient
 from app.repositories.user_repo import UserRepository
+from app.services.web_search_service import WebSearchService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
@@ -55,7 +56,12 @@ def get_chat_client(request: Request) -> ChatClient:
     return request.app.state.chat_client
 
 
+def get_web_search(request: Request) -> WebSearchService:
+    return request.app.state.web_search
+
+
 UserDep = Annotated[UserORM, Depends(get_current_user)]
 ProducerDep = Annotated[KafkaProducerManager, Depends(get_producer)]
 EmbedderDep = Annotated[EmbeddingClient, Depends(get_embedder)]
 ChatClientDep = Annotated[ChatClient, Depends(get_chat_client)]
+WebSearchDep = Annotated[WebSearchService, Depends(get_web_search)]

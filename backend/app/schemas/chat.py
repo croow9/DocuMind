@@ -1,10 +1,18 @@
+from datetime import datetime
+from typing import Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.models.message import MessageRole
 
 # Каждый вопрос стоит денег (эмбеддинг + запрос к LLM), поэтому длина ограничена
 MAX_QUESTION_LENGTH = 2000
 MAX_DOCUMENT_IDS = 20
+
+# Пока заголовок не задан, у диалога он такой; по первому вопросу его заменят
+DEFAULT_CONVERSATION_TITLE = "Новый диалог"
+MAX_TITLE_LENGTH = 255
 
 
 class MessageCreate(BaseModel):
@@ -19,6 +27,16 @@ class MessageCreate(BaseModel):
     document_ids: list[UUID] | None = Field(
         default=None, min_length=1, max_length=MAX_DOCUMENT_IDS
     )
+    # True: искать не в своих документах, а в официальной документации из
+    # интернета (список сайтов задан в настройках). Платная операция, поэтому
+    # включается только явно
+    web_search: bool = False
+
+    @model_validator(mode="after")
+    def _web_search_excludes_document_ids(self) -> Self:
+        if self.web_search and self.document_ids is not None:
+            raise ValueError("web_search нельзя сочетать с document_ids")
+        return self
 
 
 # --- данные событий потока (SSE)
@@ -28,11 +46,12 @@ class SourceRead(BaseModel):
     """Источник, который увидела модель: номер в промпте и откуда он взят."""
 
     number: int
-    chunk_id: UUID
-    document_id: UUID
+    chunk_id: UUID | None
+    document_id: UUID | None
     document_title: str
     heading_path: str | None
     content: str
+    url: str | None = None
 
 
 class TokenData(BaseModel):
@@ -49,3 +68,48 @@ class ErrorData(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     detail: str
+
+
+# --- диалоги и их история
+
+
+class ConversationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    title: str = Field(
+        default=DEFAULT_CONVERSATION_TITLE, min_length=1, max_length=MAX_TITLE_LENGTH
+    )
+
+
+class ConversationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    title: str
+    created_at: datetime
+
+
+class CitationRead(BaseModel):
+    """Цитата: копия источника на момент ответа и (если жив) ссылка на него."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    number: int
+    document_title: str
+    heading_path: str | None
+    content: str
+    document_id: UUID | None
+    chunk_id: UUID | None
+    url: str | None
+
+
+class MessageRead(BaseModel):
+    id: UUID
+    role: MessageRole
+    content: str
+    created_at: datetime
+    citations: list[CitationRead]
+
+
+class ConversationDetail(ConversationRead):
+    messages: list[MessageRead]

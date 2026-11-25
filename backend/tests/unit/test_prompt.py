@@ -6,7 +6,9 @@ from app.rag.llm import ChatMessage
 from app.rag.prompt import (
     MAX_HISTORY_MESSAGES,
     NO_ANSWER_TEXT,
+    NO_WEB_ANSWER_TEXT,
     SYSTEM_PROMPT,
+    WEB_SYSTEM_PROMPT,
     build_messages,
     extract_citation_numbers,
 )
@@ -114,3 +116,19 @@ def test_extract_citation_numbers(
     answer: str, sources_count: int, expected: list[int]
 ) -> None:
     assert extract_citation_numbers(answer, sources_count) == expected
+
+
+# --- поиск по документации в интернете
+
+
+def test_web_mode_uses_its_own_rules_and_refusal_text() -> None:
+    web = build_messages("как?", [make_chunk()], web=True)
+    own = build_messages("как?", [make_chunk()])
+
+    assert web[0].content == WEB_SYSTEM_PROMPT
+    # про «ваши документы» в веб-режиме было бы неправдой
+    assert NO_WEB_ANSWER_TEXT in WEB_SYSTEM_PROMPT
+    assert NO_ANSWER_TEXT not in WEB_SYSTEM_PROMPT
+    # режим по умолчанию остался прежним
+    assert own[0].content == SYSTEM_PROMPT
+    assert NO_WEB_ANSWER_TEXT not in SYSTEM_PROMPT

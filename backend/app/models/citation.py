@@ -40,3 +40,5 @@ class CitationORM(Base):
     chunk_id: Mapped[UUID | None] = mapped_column(
         Uuid, ForeignKey("chunks.id", ondelete="SET NULL"), index=True
     )
+    # адрес страницы, если источник взят из интернета (у своих документов None)
+    url: Mapped[str | None] = mapped_column(String(2048))

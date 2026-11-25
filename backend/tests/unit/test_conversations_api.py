@@ -10,13 +10,16 @@ from app.api.deps import get_current_user
 from app.api.v1.conversations import get_chat_service
 from app.main import app
 from app.rag.llm import FakeChat
+from app.rag.prompt import NO_WEB_ANSWER_TEXT
 from app.services.chat_service import ChatService
 
 MESSAGE_ID = uuid4()
 
 
 def make_service(conversation_exists: bool) -> ChatService:
-    service = ChatService(AsyncMock(), AsyncMock(), FakeChat(reply="Ответ [1]."))
+    service = ChatService(
+        AsyncMock(), AsyncMock(), FakeChat(reply="Ответ [1]."), AsyncMock()
+    )
     service.conversations = AsyncMock()
     service.conversations.get_by_id.return_value = (
         AsyncMock(id=uuid4()) if conversation_exists else None
@@ -24,6 +27,7 @@ def make_service(conversation_exists: bool) -> ChatService:
     service.messages = AsyncMock()
     service.messages.last_messages.return_value = []
     service.search.search.return_value = []
+    service.web.search.return_value = []
     service._save_answer = AsyncMock(return_value=MESSAGE_ID)  # type: ignore[method-assign]
     return service
 
@@ -87,3 +91,48 @@ def test_invalid_question_is_rejected_before_any_work(client_for, body: dict) ->
 
     assert response.status_code == 422
     service.messages.create.assert_not_awaited()
+
+
+@pytest.mark.parametrize("query", ["limit=0", "limit=101", "offset=-1", "limit=abc"])
+def test_list_rejects_bad_pagination(client_for, query: str) -> None:  # type: ignore[no-untyped-def]
+    client = client_for(make_service(conversation_exists=True))
+
+    assert client.get(f"/api/v1/conversations?{query}").status_code == 422
+
+
+@pytest.mark.parametrize(
+    "body", [{"title": ""}, {"title": "   "}, {"title": "x" * 256}, {"name": "x"}]
+)
+def test_create_rejects_invalid_title(client_for, body: dict) -> None:  # type: ignore[no-untyped-def,type-arg]
+    client = client_for(make_service(conversation_exists=True))
+
+    assert client.post("/api/v1/conversations", json=body).status_code == 422
+
+
+def test_web_search_cannot_be_combined_with_document_ids(client_for) -> None:  # type: ignore[no-untyped-def]
+    service = make_service(conversation_exists=True)
+    client = client_for(service)
+
+    response = client.post(
+        f"/api/v1/conversations/{uuid4()}/messages",
+        json={"question": "как?", "web_search": True, "document_ids": [str(uuid4())]},
+    )
+
+    assert response.status_code == 422
+    service.messages.create.assert_not_awaited()
+
+
+def test_web_search_question_is_streamed_from_web_not_from_documents(
+    client_for,
+) -> None:  # type: ignore[no-untyped-def]
+    service = make_service(conversation_exists=True)
+    client = client_for(service)
+
+    response = client.post(
+        f"/api/v1/conversations/{uuid4()}/messages",
+        json={"question": "как?", "web_search": True},
+    )
+
+    assert response.status_code == 200
+    assert NO_WEB_ANSWER_TEXT in response.text
+    service.search.search.assert_not_awaited()

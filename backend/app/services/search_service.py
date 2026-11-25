@@ -9,6 +9,12 @@ from app.repositories.chunk_repo import ChunkRepository
 from app.schemas.search import RetrievedChunk
 
 
+def _ids(chunks: Sequence[RetrievedChunk]) -> list[UUID]:
+    # у чанков из базы id есть всегда; None бывает только у страниц из интернета,
+    # а они сюда не попадают. Проверка нужна типам, а не логике
+    return [chunk.chunk_id for chunk in chunks if chunk.chunk_id is not None]
+
+
 class SearchService:
     def __init__(self, session: AsyncSession, embedder: EmbeddingClient) -> None:
         self.repo = ChunkRepository(session)
@@ -40,10 +46,5 @@ class SearchService:
 
         # слияние работает с id, а чанки достаём обратно по словарю
         chunks = {chunk.chunk_id: chunk for chunk in [*by_meaning, *by_words]}
-        merged = reciprocal_rank_fusion(
-            [
-                [chunk.chunk_id for chunk in by_meaning],
-                [chunk.chunk_id for chunk in by_words],
-            ]
-        )
+        merged = reciprocal_rank_fusion([_ids(by_meaning), _ids(by_words)])
         return [chunks[chunk_id] for chunk_id in merged[:top_k]]

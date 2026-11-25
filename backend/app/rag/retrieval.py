@@ -1,3 +1,4 @@
+import math
 from collections.abc import Sequence
 from uuid import UUID
 
@@ -29,3 +30,27 @@ def reciprocal_rank_fusion(
         for position, item in enumerate(ranking, start=1):
             scores[item] = scores.get(item, 0.0) + 1.0 / (k + position)
     return sorted(scores, key=lambda item: scores[item], reverse=True)
+
+
+def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
+    """Косинус угла между векторами: 1 — одно направление, 0 — ничего общего.
+
+    Длины считаем сами, а не полагаемся на единичные векторы: у OpenAI они
+    единичные, но фейковый эмбеддер и другие модели этого не гарантируют.
+    """
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
+    return dot / norm if norm else 0.0
+
+
+def top_by_similarity(
+    query: Sequence[float], vectors: Sequence[Sequence[float]], top_k: int
+) -> list[int]:
+    """Номера top_k векторов, самых близких к query, от ближайшего.
+
+    Сортировка устойчивая: при равной близости раньше идёт тот, что был раньше
+    в списке (страницы и разделы в порядке, который дал поиск).
+    """
+    scores = [cosine_similarity(query, vector) for vector in vectors]
+    order = sorted(range(len(vectors)), key=lambda i: scores[i], reverse=True)
+    return order[:top_k]

@@ -1,6 +1,12 @@
 from uuid import uuid4
 
-from app.rag.retrieval import reciprocal_rank_fusion
+import pytest
+
+from app.rag.retrieval import (
+    cosine_similarity,
+    reciprocal_rank_fusion,
+    top_by_similarity,
+)
 
 
 def test_item_found_by_both_searches_beats_leader_of_one() -> None:
@@ -51,3 +57,38 @@ def test_k_controls_how_much_the_leader_matters() -> None:
     assert reciprocal_rank_fusion(rankings, k=1)[0] == a
     # большой k сглаживает места, и побеждает согласие списков
     assert reciprocal_rank_fusion(rankings)[0] == c
+
+
+# --- косинусная близость (для страниц из интернета, которых нет в базе)
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "expected"),
+    [
+        ([1.0, 0.0], [1.0, 0.0], 1.0),  # одно направление
+        ([1.0, 0.0], [0.0, 1.0], 0.0),  # ничего общего
+        ([1.0, 0.0], [-1.0, 0.0], -1.0),  # противоположные
+        ([1.0, 2.0], [2.0, 4.0], 1.0),  # длина вектора не важна, важно направление
+        (
+            [0.0, 0.0],
+            [1.0, 1.0],
+            0.0,
+        ),  # нулевой вектор не должен давать деление на ноль
+    ],
+)
+def test_cosine_similarity(a: list[float], b: list[float], expected: float) -> None:
+    assert cosine_similarity(a, b) == pytest.approx(expected)
+
+
+def test_top_by_similarity_returns_nearest_first_and_respects_limit() -> None:
+    vectors = [[0.0, 1.0], [1.0, 0.1], [1.0, 1.0], [1.0, 0.0]]
+
+    assert top_by_similarity([1.0, 0.0], vectors, top_k=2) == [3, 1]
+    assert top_by_similarity([1.0, 0.0], vectors, top_k=10) == [3, 1, 2, 0]
+    assert top_by_similarity([1.0, 0.0], [], top_k=3) == []
+
+
+def test_equally_close_vectors_keep_their_original_order() -> None:
+    vectors = [[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]]
+
+    assert top_by_similarity([1.0, 0.0], vectors, top_k=3) == [0, 1, 2]
