@@ -97,7 +97,7 @@ async def test_openai_chat_closes_connection_when_reader_stops_early() -> None:
     pieces = OpenAIChat(client=make_client(stream)).stream(MESSAGES)
 
     assert await anext(pieces) == "раз"
-    await pieces.aclose()  # type: ignore[attr-defined]
+    await pieces.aclose()
 
     assert stream.closed
 

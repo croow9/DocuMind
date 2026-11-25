@@ -1,7 +1,7 @@
 import asyncio
 import re
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Literal, cast
 
 from openai import AsyncOpenAI
@@ -26,10 +26,14 @@ class ChatMessage(BaseModel):
 
 
 class ChatClient(ABC):
-    """Собеседник-LLM: список сообщений -> ответ, который приходит кусочками."""
+    """Собеседник-LLM: список сообщений -> ответ, который приходит кусочками.
+
+    Поток объявлен как AsyncGenerator, а не AsyncIterator: у него есть aclose(),
+    которым читатель закрывает поток, если ответ дочитывать не нужно.
+    """
 
     @abstractmethod
-    def stream(self, messages: list[ChatMessage]) -> AsyncIterator[str]:
+    def stream(self, messages: list[ChatMessage]) -> AsyncGenerator[str]:
         raise NotImplementedError
 
 
@@ -37,7 +41,7 @@ class OpenAIChat(ChatClient):
     def __init__(self, client: AsyncOpenAI | None = None) -> None:
         self._client = client or AsyncOpenAI(api_key=settings.openai_api_key)
 
-    async def stream(self, messages: list[ChatMessage]) -> AsyncIterator[str]:
+    async def stream(self, messages: list[ChatMessage]) -> AsyncGenerator[str]:
         response = await self._client.chat.completions.create(
             model=settings.chat_model,
             # SDK различает типы сообщений по ролям, а у нас роль строка: сообщаем
@@ -75,7 +79,7 @@ class FakeChat(ChatClient):
         self.delay_seconds = delay_seconds
         self.received: list[list[ChatMessage]] = []
 
-    async def stream(self, messages: list[ChatMessage]) -> AsyncIterator[str]:
+    async def stream(self, messages: list[ChatMessage]) -> AsyncGenerator[str]:
         self.received.append(messages)
         # по слову вместе с пробелами после него: склейка кусочков равна reply
         for piece in re.findall(r"\s*\S+\s*", self.reply):

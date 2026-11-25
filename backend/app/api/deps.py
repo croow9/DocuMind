@@ -7,8 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decode_access_token
 from app.db.session import get_db
+from app.ingestion.embedder import EmbeddingClient
 from app.messaging.producer import KafkaProducerManager
 from app.models import UserORM
+from app.rag.llm import ChatClient
 from app.repositories.user_repo import UserRepository
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -45,5 +47,15 @@ def get_producer(request: Request) -> KafkaProducerManager:
     return request.app.state.kafka_producer
 
 
+def get_embedder(request: Request) -> EmbeddingClient:
+    return request.app.state.embedder
+
+
+def get_chat_client(request: Request) -> ChatClient:
+    return request.app.state.chat_client
+
+
 UserDep = Annotated[UserORM, Depends(get_current_user)]
 ProducerDep = Annotated[KafkaProducerManager, Depends(get_producer)]
+EmbedderDep = Annotated[EmbeddingClient, Depends(get_embedder)]
+ChatClientDep = Annotated[ChatClient, Depends(get_chat_client)]

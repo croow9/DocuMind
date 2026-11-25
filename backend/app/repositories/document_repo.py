@@ -40,6 +40,18 @@ class DocumentRepository:
         )
         return result.scalars().all()
 
+    async def get_owned_ids(
+        self, document_ids: Sequence[UUID], owner_id: UUID
+    ) -> set[UUID]:
+        """Какие из переданных id существуют и принадлежат этому пользователю."""
+        result = await self.session.execute(
+            select(DocumentORM.id).where(
+                DocumentORM.id.in_(document_ids),
+                DocumentORM.owner_id == owner_id,
+            )
+        )
+        return set(result.scalars().all())
+
     async def create(self, document: DocumentORM) -> DocumentORM:
         self.session.add(document)
         await self.session.flush()
