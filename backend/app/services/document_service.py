@@ -6,6 +6,8 @@ from aiokafka.errors import KafkaError
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
+from app.core.sizes import human_size
 from app.ingestion.storage import DATA_DIR, document_file_path
 from app.messaging.producer import KafkaProducerManager
 from app.messaging.topics import IngestionTopics
@@ -23,9 +25,22 @@ class DocumentService:
         self.session = session
         self.repo = DocumentRepository(session)
 
+    async def _check_quota(self, user: UserORM) -> None:
+        # Проверка и вставка не атомарны: два одновременных запроса могут
+        # проскочить лимит. Для защиты от «слишком много» это терпимо
+        if await self.repo.count_for_owner(user.id) >= settings.max_documents_per_user:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Достигнут лимит документов: {settings.max_documents_per_user}. "
+                    "Удалите ненужные, чтобы загрузить новые"
+                ),
+            )
+
     async def create_from_url(
         self, user: UserORM, payload: DocumentCreate
     ) -> DocumentORM:
+        await self._check_quota(user)
         document = DocumentORM(
             owner_id=user.id,
             title=payload.title,
@@ -43,6 +58,17 @@ class DocumentService:
                 detail="Поддерживаются только файлы PDF, Markdown и TXT",
             )
 
+        # читаем не больше лимита и ещё один байт: этого хватает, чтобы понять, что файл
+        # больше, и не держать в памяти лишнее (размер UploadFile известен не всегда)
+        content = await file.read(settings.max_upload_bytes + 1)
+        if len(content) > settings.max_upload_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=f"Файл больше {human_size(settings.max_upload_bytes)}",
+            )
+        # квота проверяется до записи на диск: отклонённый файл ничего не оставляет
+        await self._check_quota(user)
+
         # id задаём сами: файл на диске хранится под именем документа,
         # а default в модели сработал бы только на flush — поздно для имени файла
         document = DocumentORM(
@@ -54,7 +80,7 @@ class DocumentService:
         )
 
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        document_file_path(document.id, suffix).write_bytes(await file.read())
+        document_file_path(document.id, suffix).write_bytes(content)
 
         return await self._create(document)
 

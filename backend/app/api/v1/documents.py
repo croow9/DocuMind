@@ -1,19 +1,26 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Query, UploadFile, status
+from fastapi import APIRouter, Depends, Query, UploadFile, status
 
 from app.api.deps import ProducerDep, SessionDep, UserDep
+from app.api.rate_limit import UPLOAD_PER_MINUTE
 from app.schemas.document import DocumentCreate, DocumentRead
 from app.services.document_service import DocumentService
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
 
-@router.post("", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=DocumentRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(UPLOAD_PER_MINUTE)],
+)
 async def create_document(
     payload: DocumentCreate, producer: ProducerDep, user: UserDep, db: SessionDep
 ) -> DocumentRead:
+    """Документ по ссылке. Частота ограничена на пользователя: сверх лимита 429 с `Retry-After`."""
     service = DocumentService(db)
     document = await service.create_from_url(user, payload)
     await service.request_indexing(document, producer)
@@ -21,7 +28,10 @@ async def create_document(
 
 
 @router.post(
-    "/upload", response_model=DocumentRead, status_code=status.HTTP_201_CREATED
+    "/upload",
+    response_model=DocumentRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(UPLOAD_PER_MINUTE)],
 )
 async def upload_document(
     producer: ProducerDep,
@@ -29,6 +39,7 @@ async def upload_document(
     user: UserDep,
     db: SessionDep,
 ) -> DocumentRead:
+    """Загрузка файла. Частота ограничена на пользователя: сверх лимита 429 с `Retry-After`."""
     service = DocumentService(db)
     document = await service.create_from_file(user, file)
     await service.request_indexing(document, producer)

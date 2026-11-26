@@ -8,6 +8,7 @@ from app.api.v1.conversations import router as conversations_router
 from app.api.v1.documents import router as documents_router
 from app.api.v1.my_web_profiles import router as my_web_profiles_router
 from app.api.v1.web_profiles import router as web_profiles_router
+from app.core.body_limit import MULTIPART_OVERHEAD_BYTES, BodySizeLimitMiddleware
 from app.core.cache import build_cache
 from app.core.config import settings
 from app.db.session import engine
@@ -32,7 +33,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # профили читаются и проверяются при запуске: ошибка в файле остановит его сразу
     app.state.web_profiles = load_web_profiles(settings.web_default_profile)
     http_client = build_http_client()
+    # один кэш на всё приложение: его берут и поиск по интернету, и зависимости
+    # запросов (ограничение частоты, кэш ответов)
     cache = build_cache()
+    app.state.cache = cache
     app.state.web_search = build_web_search_service(
         app.state.embedder, http_client, cache
     )
@@ -53,6 +57,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan)
+# тело запроса больше файла на запас под служебную часть multipart: см. BodySizeLimitMiddleware
+app.add_middleware(
+    BodySizeLimitMiddleware,
+    max_bytes=settings.max_upload_bytes + MULTIPART_OVERHEAD_BYTES,
+)
 
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")

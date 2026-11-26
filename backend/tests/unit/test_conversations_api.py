@@ -6,8 +6,10 @@ from uuid import uuid4
 import pytest
 from starlette.testclient import TestClient
 
-from app.api.deps import get_current_user, get_web_profiles
+from app.api.deps import get_cache, get_current_user, get_web_profiles
+from app.api.rate_limit import CHAT_PER_MINUTE, WEB_PER_DAY, WEB_PER_MINUTE
 from app.api.v1.conversations import get_chat_service
+from app.core.cache import InMemoryCache
 from app.main import app
 from app.rag.llm import FakeChat
 from app.rag.prompt import NO_WEB_ANSWER_TEXT
@@ -48,10 +50,15 @@ def make_service(conversation_exists: bool) -> ChatService:
 
 @pytest.fixture
 def client_for() -> Iterator[object]:
-    def build(service: ChatService) -> TestClient:
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=uuid4())
+    def build(service: ChatService, cache: InMemoryCache | None = None) -> TestClient:
+        # один пользователь на клиента: счётчики ограничения привязаны к нему
+        user = SimpleNamespace(id=uuid4())
+        app.dependency_overrides[get_current_user] = lambda: user
         app.dependency_overrides[get_chat_service] = lambda: service
         app.dependency_overrides[get_web_profiles] = lambda: PROFILES
+        # без lifespan app.state.cache нет: ограничителю подставляем кэш в памяти
+        shared_cache = cache or InMemoryCache()  # один на клиента, не на запрос
+        app.dependency_overrides[get_cache] = lambda: shared_cache
         return TestClient(app)
 
     yield build
@@ -245,3 +252,70 @@ def test_personal_list_with_conflicting_fields_is_rejected(client_for, extra) ->
     )
 
     assert response.status_code == 422
+
+
+# --- ограничение частоты: сверх лимита 429 до сохранения вопроса
+
+
+def ask(client, **body):  # type: ignore[no-untyped-def]
+    return client.post(
+        f"/api/v1/conversations/{uuid4()}/messages", json={"question": "как?", **body}
+    )
+
+
+def test_question_over_the_limit_is_429_and_is_not_saved(
+    client_for, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(CHAT_PER_MINUTE, "limit", 2)
+    service = make_service(conversation_exists=True)
+    client = client_for(service)
+
+    statuses = [ask(client).status_code for _ in range(3)]
+    rejected = ask(client)
+
+    assert statuses == [200, 200, 429]
+    assert rejected.status_code == 429
+    # настоящий ответ с JSON, а не поток; в заголовке сколько ждать
+    assert rejected.headers["content-type"].startswith("application/json")
+    assert rejected.headers["retry-after"] == "60"
+    assert "Слишком много запросов" in rejected.json()["detail"]
+    # вопросы сверх лимита не попали в историю диалога
+    assert service.messages.create.await_count == 2
+
+
+def test_web_questions_have_their_own_stricter_limit(client_for, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(WEB_PER_MINUTE, "limit", 1)
+    service = make_service(conversation_exists=True)
+    client = client_for(service)
+
+    first = ask(client, web_search=True)
+    second = ask(client, web_search=True)
+    # обычные вопросы этого пользователя лимит интернета не трогает
+    usual = ask(client)
+
+    assert (first.status_code, second.status_code, usual.status_code) == (200, 429, 200)
+    assert "по интернету" in second.json()["detail"]
+    service.web.search.assert_awaited_once()
+
+
+def test_daily_web_limit_says_how_long_to_wait_in_hours(
+    client_for, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(WEB_PER_DAY, "limit", 1)
+    client = client_for(make_service(conversation_exists=True))
+
+    ask(client, web_search=True)
+    rejected = ask(client, web_search=True)
+
+    assert rejected.status_code == 429
+    assert rejected.headers["retry-after"] == str(24 * 60 * 60)
+    assert "24 ч" in rejected.json()["detail"]
+
+
+def test_limit_does_not_hide_a_missing_conversation_from_other_users(
+    client_for,
+) -> None:  # type: ignore[no-untyped-def]
+    # в пределах лимита проверки диалога работают как прежде
+    client = client_for(make_service(conversation_exists=False))
+
+    assert ask(client).status_code == 404

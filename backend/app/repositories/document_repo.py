@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import DocumentORM
@@ -39,6 +39,14 @@ class DocumentRepository:
             .offset(offset)
         )
         return result.scalars().all()
+
+    async def count_for_owner(self, owner_id: UUID) -> int:
+        result = await self.session.execute(
+            select(func.count())
+            .select_from(DocumentORM)
+            .where(DocumentORM.owner_id == owner_id)
+        )
+        return result.scalar_one()
 
     async def get_owned_ids(
         self, document_ids: Sequence[UUID], owner_id: UUID

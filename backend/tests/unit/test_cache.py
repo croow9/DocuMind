@@ -1,9 +1,9 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from app.core.cache import InMemoryCache, RedisCache, build_cache
+from app.core.cache import InMemoryCache, RedisCache, WindowCount, build_cache
 from app.core.config import settings
 
 
@@ -93,3 +93,81 @@ async def test_bytes_from_a_client_without_decoding_are_returned_as_text() -> No
     cache, _ = make_cache(get=AsyncMock(return_value="значение".encode()))
 
     assert await cache.get("ключ") == "значение"
+
+
+# --- счётчик окна
+
+
+def make_counter(results: object = None, error: Exception | None = None):  # type: ignore[no-untyped-def]
+    """RedisCache с подставным конвейером: что в него положили и что он вернул."""
+    pipe = MagicMock()
+    pipe.execute = AsyncMock(return_value=results, side_effect=error)
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=pipe)
+    context.__aexit__ = AsyncMock(return_value=False)
+    client = MagicMock()
+    client.pipeline = MagicMock(return_value=context)
+    return RedisCache(client), client, pipe
+
+
+async def test_counter_runs_incr_expire_and_ttl_in_one_transaction() -> None:
+    cache, client, pipe = make_counter([3, True, 41])
+
+    state = await cache.incr("rl:chat:u1", 60)
+
+    assert state == WindowCount(count=3, resets_in_seconds=41)
+    # одной транзакцией: без неё сбой между командами оставил бы ключ без срока
+    client.pipeline.assert_called_once_with(transaction=True)
+    pipe.incr.assert_called_once_with("rl:chat:u1")
+    # nx=True: срок только новому ключу, иначе каждый запрос продлевал бы окно
+    pipe.expire.assert_called_once_with("rl:chat:u1", 60, nx=True)
+    pipe.ttl.assert_called_once_with("rl:chat:u1")
+    pipe.execute.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("ttl", "expected"),
+    [(41, 41), (1, 1), (0, 1), (-1, 60), (-2, 60)],
+)
+async def test_odd_ttl_from_redis_never_gives_a_zero_or_negative_wait(
+    ttl: int, expected: int
+) -> None:
+    cache, _, _ = make_counter([1, True, ttl])
+
+    state = await cache.incr("k", 60)
+
+    assert state is not None and state.resets_in_seconds == expected
+
+
+@pytest.mark.parametrize("error", [RedisConnectionError("нет связи"), OSError("сеть")])
+async def test_counter_failure_means_no_count_not_an_error(error: Exception) -> None:
+    cache, _, _ = make_counter(error=error)
+
+    assert await cache.incr("k", 60) is None
+
+
+async def test_programming_errors_in_the_counter_are_not_hidden() -> None:
+    cache, _, _ = make_counter(error=KeyError("баг"))
+
+    with pytest.raises(KeyError):
+        await cache.incr("k", 60)
+
+
+async def test_in_memory_counter_counts_per_key_and_remembers_the_window() -> None:
+    cache = InMemoryCache()
+
+    assert await cache.incr("a", 60) == WindowCount(1, 60)
+    assert await cache.incr("a", 60) == WindowCount(2, 60)
+    assert await cache.incr("b", 3600) == WindowCount(1, 3600)
+    assert cache.counters == {"a": 2, "b": 1}
+    assert cache.ttls == {"a": 60, "b": 3600}
+
+
+async def test_in_memory_counter_starts_over_when_the_window_is_over() -> None:
+    cache = InMemoryCache()
+    await cache.incr("a", 60)
+    await cache.incr("a", 60)
+
+    del cache.counters["a"]  # так тест изображает конец окна
+
+    assert await cache.incr("a", 60) == WindowCount(1, 60)

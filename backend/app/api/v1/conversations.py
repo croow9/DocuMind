@@ -13,6 +13,7 @@ from app.api.deps import (
     WebProfilesDep,
     WebSearchDep,
 )
+from app.api.rate_limit import limit_message_rate
 from app.rag.llm import ChatMessage
 from app.schemas.chat import (
     ConversationCreate,
@@ -82,6 +83,10 @@ async def prepare_message(
     conversation_id: UUID,
     payload: MessageCreate,
     user: UserDep,
+    # Ограничитель стоит среди зависимостей, а не в теле: все они выполняются до
+    # тела, так что слишком частый вопрос отклоняется раньше, чем сохранится в
+    # историю диалога
+    _rate_limit: Annotated[None, Depends(limit_message_rate)],
     service: ChatServiceDep,
 ) -> list[ChatMessage]:
     """Проверки и сохранение вопроса: зависимость выполняется до начала ответа.
@@ -119,6 +124,11 @@ async def send_message(
     поток начинается событием `status` (`searching`, пока идёт поиск), а перед
     токенами приходит ещё одно (`answering`): поиск занимает секунды, и клиент
     может показывать, на каком этапе вопрос.
+
+    Частота вопросов ограничена на пользователя (пределы в настройках
+    `RATE_LIMIT_*`): по своим документам и по интернету считается отдельно, второе
+    строже и ещё с дневным потолком. Сверх лимита приходит обычный 429 с заголовком
+    `Retry-After` (секунды до конца окна), а не поток; вопрос при этом не сохраняется.
     """
     async for event in service.answer(user.id, conversation_id, payload, history):
         yield event

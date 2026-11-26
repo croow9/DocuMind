@@ -5,6 +5,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import Cache
 from app.core.security import decode_access_token
 from app.db.session import get_db
 from app.ingestion.embedder import EmbeddingClient
@@ -65,9 +66,14 @@ def get_web_profiles(request: Request) -> WebProfiles:
     return request.app.state.web_profiles
 
 
+def get_cache(request: Request) -> Cache:
+    return request.app.state.cache
+
+
 UserDep = Annotated[UserORM, Depends(get_current_user)]
 ProducerDep = Annotated[KafkaProducerManager, Depends(get_producer)]
 EmbedderDep = Annotated[EmbeddingClient, Depends(get_embedder)]
 ChatClientDep = Annotated[ChatClient, Depends(get_chat_client)]
 WebSearchDep = Annotated[WebSearchService, Depends(get_web_search)]
 WebProfilesDep = Annotated[WebProfiles, Depends(get_web_profiles)]
+CacheDep = Annotated[Cache, Depends(get_cache)]
