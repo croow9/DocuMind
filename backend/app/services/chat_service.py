@@ -29,6 +29,7 @@ from app.schemas.chat import (
     ErrorData,
     MessageCreate,
     SourceRead,
+    StatusData,
     TokenData,
 )
 from app.schemas.search import RetrievedChunk
@@ -38,6 +39,9 @@ from app.services.web_search_service import WebSearchService
 logger = logging.getLogger(__name__)
 
 STREAM_ERROR_TEXT = "Не удалось получить ответ. Попробуйте задать вопрос ещё раз."
+
+SEARCHING_TEXT = "Ищу в документации…"
+ANSWERING_TEXT = "Читаю найденное и формулирую ответ…"
 
 # Сколько прежних вопросов диалога отдаём поиску по интернету как контекст
 MAX_WEB_CONTEXT_QUESTIONS = 2
@@ -136,6 +140,9 @@ class ChatService:
     ) -> AsyncIterator[ServerSentEvent]:
         """Поток событий: sources -> token... -> done (или error).
 
+        В режиме поиска по интернету вокруг них идут события status: «searching»
+        до поиска (он занимает секунды) и «answering» перед ответом модели.
+
         Любой сбой внутри превращается в событие error: исключение из потока
         клиент не увидит, соединение просто оборвётся. Отмена (клиент ушёл)
         исключением Exception не является и проходит насквозь: в этом случае
@@ -143,6 +150,10 @@ class ChatService:
         """
         try:
             if payload.web_search:
+                yield ServerSentEvent(
+                    event="status",
+                    data=StatusData(stage="searching", text=SEARCHING_TEXT),
+                )
                 # поиску нужны прежние вопросы, чтобы понять короткое уточнение
                 previous = [m.content for m in history if m.role == "user"]
                 sources = await self.web.search(
@@ -168,6 +179,11 @@ class ChatService:
 
             parts: list[str] = []
             if sources:
+                if payload.web_search:
+                    yield ServerSentEvent(
+                        event="status",
+                        data=StatusData(stage="answering", text=ANSWERING_TEXT),
+                    )
                 messages = build_messages(
                     payload.question, sources, history, web=payload.web_search
                 )

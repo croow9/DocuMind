@@ -9,6 +9,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, ConfigDict
 
 from app.core.config import settings
+from app.core.openai_client import build_openai_client
 
 # Пауза между кусочками у фейка: без неё весь «поток» прилетает мгновенно, и в
 # curl -N не видно, что ответ идёт частями
@@ -39,7 +40,7 @@ class ChatClient(ABC):
 
 class OpenAIChat(ChatClient):
     def __init__(self, client: AsyncOpenAI | None = None) -> None:
-        self._client = client or AsyncOpenAI(api_key=settings.openai_api_key)
+        self._client = client or build_openai_client()
 
     async def stream(self, messages: list[ChatMessage]) -> AsyncGenerator[str]:
         response = await self._client.chat.completions.create(

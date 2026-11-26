@@ -1,21 +1,33 @@
+import json
+from collections.abc import Sequence
 from unittest.mock import AsyncMock
 
+import pytest
+
+from app.core.cache import InMemoryCache
 from app.ingestion.embedder import EmbeddingClient
-from app.ingestion.web_pages import PageFetchError
+from app.ingestion.web_pages import FetchedPage, PageFetchError, html_to_markdown
+from app.rag.query_rewrite import FakeQueryRewriter
 from app.rag.web_profiles import WebProfile
-from app.rag.web_search import FakePageFinder
+from app.rag.web_search import FakePageFinder, FoundPage
 from app.services.web_search_service import (
     MAX_CHUNKS_PER_PAGE,
+    MAX_FULL_TEXT_CHARS,
     WebSearchService,
     build_http_client,
 )
 
 DOMAINS = ["fastapi.tiangolo.com"]
+TTL = 3600
 PROFILE = WebProfile(name="backend", title="Backend", domains=tuple(DOMAINS))
 PYTHON_PROFILE = WebProfile(name="python", title="Python", domains=("docs.python.org",))
 GOOD = "https://fastapi.tiangolo.com/tutorial/dependencies/"
 OTHER = "https://fastapi.tiangolo.com/tutorial/security/"
 EVIL = "https://evil.com/fastapi.tiangolo.com"
+
+
+def fetched(html: str) -> FetchedPage:
+    return FetchedPage(*html_to_markdown(html))
 
 
 def page(title: str, **sections: str) -> str:
@@ -38,22 +50,29 @@ class VectorEmbedder(EmbeddingClient):
 
 def make_service(
     pages: dict[str, str | Exception],
-    found: list[str],
+    found: list[str | FoundPage],
     embedder: EmbeddingClient | None = None,
     max_pages: int = 4,
+    rewriter: FakeQueryRewriter | None = None,
 ) -> tuple[WebSearchService, FakePageFinder, AsyncMock]:
     finder = FakePageFinder(found)
     fetcher = AsyncMock()
 
-    async def fetch(url: str, domains: list[str]) -> str:
+    async def fetch(url: str, domains: list[str]) -> FetchedPage:
         result = pages[url]
         if isinstance(result, Exception):
             raise result
-        return result
+        return fetched(result)
 
     fetcher.fetch.side_effect = fetch
     service = WebSearchService(
-        finder, fetcher, embedder or VectorEmbedder({}), max_pages
+        finder,
+        fetcher,
+        embedder or VectorEmbedder({}),
+        rewriter or FakeQueryRewriter(),
+        InMemoryCache(),
+        max_pages,
+        cache_ttl_seconds=TTL,
     )
     return service, finder, fetcher.fetch
 
@@ -138,7 +157,7 @@ async def test_blank_question_does_not_even_search() -> None:
     service, finder, _ = make_service({}, found=[GOOD])
 
     assert await service.search("   ", PROFILE) == []
-    assert finder.questions == []
+    assert finder.queries == []
 
 
 async def test_finder_and_fetcher_get_the_domains_of_the_chosen_profile() -> None:
@@ -188,16 +207,19 @@ async def test_pages_in_preferred_languages_and_current_version_are_downloaded_f
         FakePageFinder(list(urls.values())),
         fetch := AsyncMock(),
         VectorEmbedder({}),
+        FakeQueryRewriter(),
+        InMemoryCache(),
         max_pages=3,
+        cache_ttl_seconds=TTL,
     )
-    fetch.fetch.return_value = page("asyncio", s="текст")
+    fetch.fetch.return_value = fetched(page("asyncio", s="текст"))
 
     await service.search("вопрос", PYTHON_PROFILE)
 
-    fetched = [call.args[0] for call in fetch.fetch.await_args_list]
+    downloaded = [call.args[0] for call in fetch.fetch.await_args_list]
     # впереди «нужный язык, актуальная версия»; закреплённая версия хуже,
     # чужой язык ещё хуже; при равных оценках порядок поиска сохраняется
-    assert fetched == [urls["latest"], urls["ru"], urls["old"]]
+    assert downloaded == [urls["latest"], urls["ru"], urls["old"]]
 
 
 async def test_foreign_language_page_is_still_used_when_nothing_better_exists() -> None:
@@ -227,9 +249,12 @@ async def test_translations_and_versions_of_one_page_take_one_place() -> None:
         FakePageFinder(found),
         fetch := AsyncMock(),
         VectorEmbedder({}),
+        FakeQueryRewriter(),
+        InMemoryCache(),
         max_pages=4,
+        cache_ttl_seconds=TTL,
     )
-    fetch.fetch.return_value = page("asyncio", s="текст")
+    fetch.fetch.return_value = fetched(page("asyncio", s="текст"))
 
     await service.search("вопрос", PYTHON_PROFILE)
 
@@ -240,12 +265,412 @@ async def test_translations_and_versions_of_one_page_take_one_place() -> None:
     ]
 
 
-async def test_previous_questions_are_passed_to_the_finder() -> None:
-    service, finder, _ = make_service({GOOD: page("A", s="текст")}, found=[GOOD])
+async def test_search_and_ranking_use_the_rewritten_query_not_the_raw_question() -> (
+    None
+):
+    rewriter = FakeQueryRewriter(reply="fastapi yield dependency")
+    embedder = VectorEmbedder({})
+    service, finder, _ = make_service(
+        {GOOD: page("A", s="текст")}, found=[GOOD], embedder=embedder, rewriter=rewriter
+    )
 
     await service.search(
         "а как с yield?", PROFILE, context=["как объявить Depends в FastAPI?"]
     )
 
-    assert finder.questions == ["а как с yield?"]
-    assert finder.contexts == [["как объявить Depends в FastAPI?"]]
+    assert rewriter.calls == [("а как с yield?", ["как объявить Depends в FastAPI?"])]
+    assert finder.queries == ["fastapi yield dependency"]
+    assert embedder.calls[0][0] == "fastapi yield dependency"
+
+
+# --- страницы, которые поисковик отдал вместе с текстом
+
+TEXT_PAGE = "# Зависимости\n\nтекст про Depends"
+
+
+async def test_page_with_text_from_the_finder_is_not_downloaded() -> None:
+    service, _, fetch = make_service(
+        {}, found=[FoundPage(GOOD, title="Зависимости - FastAPI", text=TEXT_PAGE)]
+    )
+
+    [result] = await service.search("вопрос", PROFILE)
+
+    fetch.assert_not_awaited()
+    assert (result.url, result.document_title) == (GOOD, "Зависимости - FastAPI")
+    assert result.heading_path == "Зависимости" and "Depends" in result.content
+
+
+async def test_page_without_text_is_downloaded_with_its_title_from_the_finder() -> None:
+    service, _, fetch = make_service(
+        {GOOD: page("Название со страницы", s="текст")},
+        found=[FoundPage(GOOD, title="Название от поисковика")],
+    )
+
+    [result] = await service.search("вопрос", PROFILE)
+
+    fetch.assert_awaited_once()
+    assert result.document_title == "Название от поисковика"
+
+
+async def test_text_from_the_finder_is_cleaned_before_chunking() -> None:
+    text = '[Skip to content](#x)\n\n# Заголовок[¶](#z "Permanent link")\n\nтекст'
+    service, _, _ = make_service({}, found=[FoundPage(GOOD, text=text)])
+
+    [result] = await service.search("вопрос", PROFILE)
+
+    assert result.heading_path == "Заголовок"
+
+
+async def test_text_of_a_foreign_site_is_never_used_even_if_the_finder_supplied_it() -> (
+    None
+):
+    embedder = VectorEmbedder({})
+    service, _, fetch = make_service(
+        {}, found=[FoundPage(EVIL, text="# Чужое\n\nвредный текст")], embedder=embedder
+    )
+
+    assert await service.search("вопрос", PROFILE) == []
+    assert embedder.calls == []
+    fetch.assert_not_awaited()
+
+
+async def test_huge_document_is_replaced_by_the_snippets_chosen_for_the_question() -> (
+    None
+):
+    huge = "# Спецификация\n\n" + "вводная часть " * (MAX_FULL_TEXT_CHARS // 10)
+    snippet = '## Exclusive gateway[¶](#e "Permanent link")\n\nотрывок про шлюз'
+    embedder = VectorEmbedder({})
+    service, _, _ = make_service(
+        {}, found=[FoundPage(GOOD, text=huge, snippet=snippet)], embedder=embedder
+    )
+
+    [result] = await service.search("вопрос", PROFILE)
+
+    assert embedder.calls == [["вопрос", "отрывок про шлюз"]]
+    assert result.heading_path == "Exclusive gateway"
+
+
+async def test_page_exactly_at_the_size_limit_is_used_in_full_one_more_is_not() -> None:
+    head = "# Раздел\n\n"
+    for extra, expected_in_calls in ((0, False), (1, True)):
+        text = head + "x" * (MAX_FULL_TEXT_CHARS - len(head) + extra)
+        assert len(text) == MAX_FULL_TEXT_CHARS + extra
+        embedder = VectorEmbedder({})
+        service, _, _ = make_service(
+            {}, found=[FoundPage(GOOD, text=text, snippet="отрывок")], embedder=embedder
+        )
+
+        await service.search("вопрос", PROFILE)
+
+        # на самом лимите берём страницу целиком, на символ больше уже отрывки
+        assert ("отрывок" in embedder.calls[0]) is expected_in_calls
+
+
+async def test_huge_document_without_snippets_is_cut_to_the_chunk_limit() -> None:
+    sections = "".join(
+        f"## Раздел {i}\n\nтекст {i}\n\n" for i in range(MAX_CHUNKS_PER_PAGE + 20)
+    )
+    text = sections + "я" * MAX_FULL_TEXT_CHARS
+    embedder = VectorEmbedder({})
+    service, _, _ = make_service(
+        {}, found=[FoundPage(GOOD, text=text)], embedder=embedder
+    )
+
+    await service.search("вопрос", PROFILE)
+
+    assert len(embedder.calls[0]) == 1 + MAX_CHUNKS_PER_PAGE
+
+
+# --- кэш: найденные страницы и скачанные страницы
+
+SEARCH_PREFIX = "web:search:v1:"
+PAGE_PREFIX = "web:page:v1:"
+
+
+def cached(service: WebSearchService, prefix: str) -> dict[str, str]:
+    assert isinstance(service.cache, InMemoryCache)
+    return {k: v for k, v in service.cache.values.items() if k.startswith(prefix)}
+
+
+async def test_same_question_is_answered_from_cache_without_asking_the_finder_again() -> (
+    None
+):
+    service, finder, _ = make_service(
+        {}, found=[FoundPage(GOOD, title="Зависимости", text="# Раздел\n\nтекст")]
+    )
+
+    first = await service.search("вопрос", PROFILE)
+    second = await service.search("вопрос", PROFILE)
+
+    assert len(finder.queries) == 1
+    assert second == first and len(first) == 1
+
+
+async def test_cache_key_ignores_case_and_spaces_but_not_the_query_itself() -> None:
+    service, finder, _ = make_service(
+        {}, found=[FoundPage(GOOD, text="# Раздел\n\nтекст")]
+    )
+
+    await service.search("FastAPI   Yield", PROFILE)
+    await service.search("fastapi yield", PROFILE)
+    await service.search("fastapi depends", PROFILE)
+
+    assert finder.queries == ["FastAPI   Yield", "fastapi depends"]
+
+
+async def test_profiles_do_not_share_cache_entries() -> None:
+    service, finder, _ = make_service(
+        {}, found=[FoundPage(GOOD, text="# Раздел\n\nтекст")]
+    )
+    other = WebProfile(name="other", title="Другой", domains=tuple(DOMAINS))
+
+    await service.search("вопрос", PROFILE)
+    await service.search("вопрос", other)
+
+    assert len(finder.queries) == 2
+    assert len(cached(service, SEARCH_PREFIX)) == 2
+
+
+async def test_entry_is_stored_with_the_configured_lifetime() -> None:
+    service, _, _ = make_service({}, found=[FoundPage(GOOD, text="# Раздел\n\nтекст")])
+
+    await service.search("вопрос", PROFILE)
+
+    assert set(service.cache.ttls.values()) == {TTL}
+
+
+async def test_empty_search_result_is_not_remembered() -> None:
+    service, finder, _ = make_service({}, found=[EVIL])
+
+    assert await service.search("вопрос", PROFILE) == []
+    await service.search("вопрос", PROFILE)
+
+    # чужой сайт отброшен, получилось пусто: повторяем поиск, а не помним пустоту
+    assert len(finder.queries) == 2
+    assert cached(service, SEARCH_PREFIX) == {}
+
+
+async def test_failed_search_leaves_nothing_in_cache() -> None:
+    service, finder, _ = make_service({}, found=[GOOD])
+    finder.find = AsyncMock(side_effect=RuntimeError("поиск недоступен"))  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        await service.search("вопрос", PROFILE)
+
+    assert service.cache.values == {}
+
+
+async def test_cache_holds_only_allowed_trimmed_pages() -> None:
+    huge = "# Спецификация\n\n" + "вводная часть " * MAX_FULL_TEXT_CHARS
+    service, _, _ = make_service(
+        {},
+        found=[FoundPage(EVIL, text="# Чужое\n\nвредное"), FoundPage(GOOD, text=huge)],
+    )
+
+    await service.search("вопрос", PROFILE)
+
+    [raw] = cached(service, SEARCH_PREFIX).values()
+    stored = json.loads(raw)
+    assert [item["url"] for item in stored] == [GOOD]  # чужой сайт не сохранён
+    assert (
+        len(stored[0]["text"]) == MAX_FULL_TEXT_CHARS
+    )  # хвост, который не прочтём, тоже
+
+
+@pytest.mark.parametrize(
+    "garbage", ["не json", '{"a": 1}', "[1, 2]", '[{"нет": "url"}]']
+)
+async def test_damaged_cache_entry_is_ignored_and_replaced(garbage: str) -> None:
+    service, finder, _ = make_service(
+        {}, found=[FoundPage(GOOD, text="# Раздел\n\nтекст")]
+    )
+    await service.search("вопрос", PROFILE)
+    [key] = cached(service, SEARCH_PREFIX)
+    service.cache.values[key] = garbage
+
+    results = await service.search("вопрос", PROFILE)
+
+    assert len(finder.queries) == 2 and len(results) == 1
+    assert json.loads(service.cache.values[key])[0]["url"] == GOOD
+
+
+async def test_too_big_entry_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.services.web_search_service.MAX_CACHED_BYTES", 50)
+    service, finder, _ = make_service(
+        {}, found=[FoundPage(GOOD, text="# Раздел\n\n" + "текст " * 50)]
+    )
+
+    await service.search("вопрос", PROFILE)
+    await service.search("вопрос", PROFILE)
+
+    assert len(finder.queries) == 2
+
+
+async def test_zero_lifetime_turns_the_cache_off() -> None:
+    service, finder, _ = make_service({}, found=[FoundPage(GOOD, text="# А\n\nтекст")])
+    service.cache_ttl_seconds = 0
+
+    await service.search("вопрос", PROFILE)
+    await service.search("вопрос", PROFILE)
+
+    assert len(finder.queries) == 2 and service.cache.values == {}
+
+
+async def test_downloaded_page_is_cached_and_not_downloaded_twice() -> None:
+    service, _, fetch = make_service(
+        {GOOD: page("Название", s="текст")}, found=[FoundPage(GOOD)]
+    )
+    # поиск каждый раз новый (ключ другой), страница одна и та же
+    first = await service.search("первый вопрос", PROFILE)
+    second = await service.search("второй вопрос", PROFILE)
+
+    assert fetch.await_count == 1
+    assert [r.content for r in second] == [r.content for r in first] == ["текст"]
+    assert len(cached(service, PAGE_PREFIX)) == 1
+
+
+async def test_failed_download_is_not_cached() -> None:
+    service, _, fetch = make_service(
+        {GOOD: PageFetchError("HTTP 500")}, found=[FoundPage(GOOD)]
+    )
+
+    await service.search("первый", PROFILE)
+    await service.search("второй", PROFILE)
+
+    assert fetch.await_count == 2
+    assert cached(service, PAGE_PREFIX) == {}
+
+
+async def test_damaged_page_entry_triggers_a_new_download() -> None:
+    service, _, fetch = make_service(
+        {GOOD: page("Название", s="текст")}, found=[FoundPage(GOOD)]
+    )
+    await service.search("первый", PROFILE)
+    [key] = cached(service, PAGE_PREFIX)
+    service.cache.values[key] = '{"title": "только название"}'
+
+    await service.search("второй", PROFILE)
+
+    assert fetch.await_count == 2
+
+
+async def test_downloaded_huge_page_is_cut_to_what_is_read_before_it_is_cached() -> (
+    None
+):
+    huge = page("Справочник", s="я" * (MAX_FULL_TEXT_CHARS * 2))
+    service, _, _ = make_service({GOOD: huge}, found=[FoundPage(GOOD)])
+
+    await service.search("вопрос", PROFILE)
+
+    [raw] = cached(service, PAGE_PREFIX).values()
+    assert len(json.loads(raw)["text"]) == MAX_FULL_TEXT_CHARS
+
+
+async def test_switching_the_cache_off_stops_reading_already_stored_entries() -> None:
+    service, finder, fetch = make_service(
+        {GOOD: page("Название", s="текст")}, found=[FoundPage(GOOD)]
+    )
+    await service.search("вопрос", PROFILE)  # записи в кэше есть
+    assert fetch.await_count == 1 and len(finder.queries) == 1
+
+    service.cache_ttl_seconds = 0
+    await service.search("вопрос", PROFILE)
+
+    # ни найденные страницы, ни скачанные из кэша не берутся
+    assert len(finder.queries) == 2 and fetch.await_count == 2
+
+
+# --- кэш перефразирования
+
+
+class ChangingRewriter(FakeQueryRewriter):
+    """Каждый раз формулирует по-новому, как живая модель."""
+
+    async def rewrite(self, question: str, context: Sequence[str] = ()) -> str:
+        await super().rewrite(question, context)
+        return f"запрос номер {len(self.calls)}"
+
+
+async def test_rewriting_is_remembered_so_the_search_query_stays_the_same() -> None:
+    rewriter = ChangingRewriter()
+    service, finder, _ = make_service(
+        {}, found=[FoundPage(GOOD, text="# Раздел\n\nтекст")], rewriter=rewriter
+    )
+
+    await service.search("как объявить зависимость?", PROFILE)
+    await service.search("как объявить зависимость?", PROFILE)
+
+    # без запоминания вторая формулировка отличалась бы и поиск шёл бы заново
+    assert len(rewriter.calls) == 1
+    assert finder.queries == ["запрос номер 1"]
+
+
+async def test_rewriting_key_ignores_case_and_spaces_of_the_question() -> None:
+    rewriter = FakeQueryRewriter(reply="fastapi yield")
+    service, _, _ = make_service(
+        {}, found=[FoundPage(GOOD, text="# Раздел\n\nтекст")], rewriter=rewriter
+    )
+
+    await service.search("Как   объявить YIELD?", PROFILE)
+    await service.search("как объявить yield?", PROFILE)
+
+    assert len(rewriter.calls) == 1
+
+
+async def test_same_follow_up_in_other_conversation_is_rewritten_separately() -> None:
+    rewriter = FakeQueryRewriter(reply="fastapi yield")
+    service, _, _ = make_service(
+        {}, found=[FoundPage(GOOD, text="# Раздел\n\nтекст")], rewriter=rewriter
+    )
+    follow_up = "а как с yield?"
+
+    await service.search(follow_up, PROFILE, context=["про Depends"])
+    await service.search(follow_up, PROFILE, context=["про Depends"])
+    await service.search(follow_up, PROFILE, context=["про Kafka"])
+    await service.search(follow_up, PROFILE)
+
+    # одинаковый контекст — одно обращение, разный или пустой — отдельные
+    assert [c[1] for c in rewriter.calls] == [["про Depends"], ["про Kafka"], []]
+
+
+async def test_question_returned_unchanged_is_not_remembered() -> None:
+    # так выглядит запасной вариант при сбое модели: сутки им пользоваться нельзя
+    rewriter = FakeQueryRewriter()
+    service, _, _ = make_service(
+        {}, found=[FoundPage(GOOD, text="# Раздел\n\nтекст")], rewriter=rewriter
+    )
+
+    await service.search("вопрос", PROFILE)
+    await service.search("вопрос", PROFILE)
+
+    assert len(rewriter.calls) == 2
+    assert cached(service, "web:rewrite:") == {}
+
+
+async def test_rewriting_is_stored_for_the_configured_time_without_the_question_text() -> (
+    None
+):
+    rewriter = FakeQueryRewriter(reply="fastapi yield")
+    service, _, _ = make_service(
+        {}, found=[FoundPage(GOOD, text="# Раздел\n\nтекст")], rewriter=rewriter
+    )
+
+    await service.search("секретный вопрос", PROFILE, context=["секретный контекст"])
+
+    [(key, value)] = cached(service, "web:rewrite:v2:").items()
+    assert value == "fastapi yield"
+    assert service.cache.ttls[key] == TTL
+    assert "секретный" not in key
+
+
+async def test_zero_lifetime_rewrites_every_time() -> None:
+    rewriter = FakeQueryRewriter(reply="fastapi yield")
+    service, _, _ = make_service(
+        {}, found=[FoundPage(GOOD, text="# Раздел\n\nтекст")], rewriter=rewriter
+    )
+    service.cache_ttl_seconds = 0
+
+    await service.search("вопрос", PROFILE)
+    await service.search("вопрос", PROFILE)
+
+    assert len(rewriter.calls) == 2

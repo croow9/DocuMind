@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
 
     openai_api_key: str = ""
+    # Сколько ждать ответа OpenAI (для потока: очередного куска), секунд
+    openai_timeout_seconds: float = 60.0
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 
@@ -34,12 +36,18 @@ class Settings(BaseSettings):
     # Какие сайты разрешены, описано профилями в app/rag/web_profiles.json; это
     # профиль, который берётся, если клиент не указал свой
     web_default_profile: str = "backend"
+    # Поисковый API с фильтром по доменам и текстами страниц; пусто = запасной
+    # поиск через OpenAI (менее надёжный на длинных списках сайтов)
+    tavily_api_key: str = ""
     # Модель, которая ищет страницы (её встроенный веб-поиск). Не «думающая»:
     # по той же причине, что и chat_model; ограничение по доменам делаем сами
     web_search_model: str = "gpt-4.1-mini"
     # Сколько страниц скачиваем на один вопрос
     web_max_pages: int = 4
     web_fetch_timeout_seconds: float = 10.0
+    # На сколько кэшируем найденные страницы документации (0 — не кэшировать).
+    # Документация меняется редко, а поиск и скачивание стоят секунд и кредитов
+    web_cache_ttl_seconds: int = 86_400
 
     # Kafka
     kafka_bootstrap_servers: str = "localhost:9094"

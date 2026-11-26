@@ -12,7 +12,7 @@ from app.models.message import MessageRole
 from app.rag.llm import ChatClient, ChatMessage, FakeChat
 from app.rag.prompt import NO_ANSWER_TEXT, NO_WEB_ANSWER_TEXT, WEB_SYSTEM_PROMPT
 from app.rag.web_profiles import WebProfile, WebProfiles
-from app.schemas.chat import DEFAULT_CONVERSATION_TITLE, MessageCreate
+from app.schemas.chat import DEFAULT_CONVERSATION_TITLE, MessageCreate, StatusData
 from app.schemas.search import RetrievedChunk
 from app.services.chat_service import ChatService, title_from_question
 
@@ -367,7 +367,7 @@ async def test_web_search_answers_from_web_sources_not_from_own_documents() -> N
 
     service.web.search.assert_awaited_once_with("как?", BACKEND, context=[])
     service.search.search.assert_not_awaited()
-    source = events[0].data[0]
+    source = next(e for e in events if e.event == "sources").data[0]
     assert (source.url, source.chunk_id, source.document_id) == (WEB_URL, None, None)
     assert events[-1].data.citations == [1]
     save.assert_awaited_once_with(
@@ -375,6 +375,32 @@ async def test_web_search_answers_from_web_sources_not_from_own_documents() -> N
     )
     # модель получила правила для документации из интернета, а не для своих документов
     assert chat.received[0][0].content == WEB_SYSTEM_PROMPT
+
+
+async def test_web_search_reports_its_stages_around_the_sources() -> None:
+    service, _, _ = make_service(FakeChat(reply="Ответ [1]."), [])
+    service.web.search.return_value = [make_web_chunk()]
+
+    events = await collect_web(service)
+
+    assert [e.event for e in events[:3]] == ["status", "sources", "status"]
+    stages = [e.data.stage for e in events if e.event == "status"]
+    assert stages == ["searching", "answering"]
+    assert all(
+        isinstance(e.data, StatusData) and e.data.text
+        for e in events
+        if e.event == "status"
+    )
+    assert [e.event for e in events[3:]] == ["token"] * (len(events) - 4) + ["done"]
+
+
+async def test_own_documents_answer_has_no_status_events() -> None:
+    service, _, _ = make_service(FakeChat(reply="Ответ [1]."), [make_chunk()])
+
+    events = await collect(service)
+
+    assert "status" not in [e.event for e in events]
+    assert events[0].event == "sources"
 
 
 async def test_web_search_uses_the_profile_from_the_request() -> None:
@@ -402,8 +428,9 @@ async def test_web_search_without_pages_gives_web_refusal_without_calling_llm() 
 
     events = await collect_web(service)
 
-    assert [e.event for e in events] == ["sources", "token", "done"]
-    assert events[1].data.text == NO_WEB_ANSWER_TEXT
+    # статус «отвечаю» не нужен: модель не вызывается
+    assert [e.event for e in events] == ["status", "sources", "token", "done"]
+    assert events[2].data.text == NO_WEB_ANSWER_TEXT
     assert chat.received == []
     save.assert_awaited_once_with(CONVERSATION_ID, NO_WEB_ANSWER_TEXT, [], [])
 
@@ -414,7 +441,8 @@ async def test_web_search_failure_becomes_error_event_and_nothing_is_saved() -> 
 
     events = await collect_web(service)
 
-    assert [e.event for e in events] == ["error"]
+    # клиент уже получил «ищу» и теперь получает ошибку, а не тишину
+    assert [e.event for e in events] == ["status", "error"]
     save.assert_not_awaited()
 
 

@@ -4,8 +4,10 @@ import pytest
 from app.ingestion.chunker import split_into_chunks
 from app.ingestion.web_pages import (
     MAX_REDIRECTS,
+    FetchedPage,
     PageFetcher,
     PageFetchError,
+    clean_markdown,
     html_to_markdown,
     is_allowed_url,
     normalize_url,
@@ -84,9 +86,9 @@ async def test_fetch_returns_page_text() -> None:
             200, headers=HTML_HEADERS, content="<p>Привет</p>".encode()
         )
 
-    html = await make_fetcher(handler).fetch("https://fastapi.tiangolo.com/", ALLOWED)
+    page = await make_fetcher(handler).fetch("https://fastapi.tiangolo.com/", ALLOWED)
 
-    assert html == "<p>Привет</p>"
+    assert page == FetchedPage(title="", text="Привет")
 
 
 async def test_fetch_follows_redirect_inside_allowed_domains() -> None:
@@ -95,11 +97,11 @@ async def test_fetch_follows_redirect_inside_allowed_domains() -> None:
             return httpx.Response(301, headers={"location": "/new/"})
         return httpx.Response(200, headers=HTML_HEADERS, content="<p>новая</p>")
 
-    html = await make_fetcher(handler).fetch(
+    page = await make_fetcher(handler).fetch(
         "https://fastapi.tiangolo.com/old/", ALLOWED
     )
 
-    assert html == "<p>новая</p>"
+    assert page.text == "новая"
 
 
 async def test_redirect_to_foreign_host_is_refused_without_connecting() -> None:
@@ -143,9 +145,17 @@ async def test_disallowed_url_makes_no_request_at_all() -> None:
         (httpx.Response(404, headers=HTML_HEADERS, content="нет"), "404"),
         (
             httpx.Response(
-                200, headers={"content-type": "application/pdf"}, content=b"%PDF"
+                200, headers={"content-type": "image/png"}, content=b"\x89PNG"
             ),
-            "не HTML",
+            "не HTML и не PDF",
+        ),
+        (
+            httpx.Response(
+                200,
+                headers={"content-type": "application/pdf"},
+                content=b"%PDF-1.4 garbage",
+            ),
+            "не удалось прочитать PDF",
         ),
         (httpx.Response(200, content="<p>без типа</p>"), "не HTML"),
         (
@@ -254,3 +264,155 @@ def test_code_fence_is_longer_than_backticks_inside_the_code() -> None:
 def test_empty_or_broken_html_gives_empty_text() -> None:
     assert html_to_markdown("") == ("", "")
     assert html_to_markdown("<div><p>не закрыто") == ("", "не закрыто")
+
+
+# --- clean_markdown: чистка готового markdown от поискового сервиса
+
+SEARCH_MARKDOWN = """[Skip to content](#dependencies-with-yield)
+
+* [Первый раздел](#pervyj)
+  + [Вложенный](#vlozhennyj)
+
+# Dependencies with yield[¶](#dependencies-with-yield "Permanent link")
+
+Текст со [ссылкой](https://example.com/) и [якорем](#x) внутри абзаца.
+
+## Первый раздел[¶](#pervyj "Permanent link")
+
+```python
+* [не оглавление](#x)
+# comment[¶](#keep)
+```
+"""
+
+
+def test_toc_skip_links_and_heading_anchors_are_removed() -> None:
+    text = clean_markdown(SEARCH_MARKDOWN)
+
+    assert "Skip to content" not in text and "Вложенный" not in text
+    assert "# Dependencies with yield\n" in text and "¶" not in text.split("```")[0]
+    assert [c.heading_path for c in split_into_chunks(text)] == [
+        "Dependencies with yield",
+        "Dependencies with yield > Первый раздел",
+    ]
+
+
+def test_links_inside_text_and_code_blocks_are_left_alone() -> None:
+    text = clean_markdown(SEARCH_MARKDOWN)
+
+    assert "[ссылкой](https://example.com/) и [якорем](#x) внутри" in text
+    assert "* [не оглавление](#x)\n# comment[¶](#keep)" in text
+
+
+def test_clean_markdown_collapses_blank_lines_left_by_removed_ones() -> None:
+    assert clean_markdown("a\n\n* [x](#y)\n\n\n\nb") == "a\n\nb"
+
+
+# --- PDF: запасной путь, когда поисковик не принёс текст страницы
+
+PDF_HEADERS = {"content-type": "application/pdf"}
+
+
+def pdf_response(data: bytes, **headers: str) -> httpx.Response:
+    return httpx.Response(200, headers={**PDF_HEADERS, **headers}, content=data)
+
+
+async def test_pdf_becomes_markdown_with_a_section_per_page_and_its_title(
+    pdf_bytes,  # type: ignore[no-untyped-def]
+) -> None:
+    data = pdf_bytes("First page text", "Second page text", title="BPMN Specification")
+    fetcher = make_fetcher(lambda request: pdf_response(data))
+
+    page = await fetcher.fetch("https://fastapi.tiangolo.com/spec.pdf", ALLOWED)
+
+    assert page.title == "BPMN Specification"
+    assert page.text == (
+        "# Страница 1\n\nFirst page text\n\n# Страница 2\n\nSecond page text"
+    )
+    # номер страницы доходит до цитаты через путь раздела
+    assert [c.heading_path for c in split_into_chunks(page.text)] == [
+        "Страница 1",
+        "Страница 2",
+    ]
+
+
+async def test_pages_without_text_are_skipped_but_keep_their_numbers(
+    pdf_bytes,  # type: ignore[no-untyped-def]
+) -> None:
+    fetcher = make_fetcher(lambda request: pdf_response(pdf_bytes("one", "", "three")))
+
+    page = await fetcher.fetch("https://fastapi.tiangolo.com/a.pdf", ALLOWED)
+
+    assert page.text == "# Страница 1\n\none\n\n# Страница 3\n\nthree"
+
+
+async def test_pdf_without_any_text_is_refused_as_a_possible_scan(
+    pdf_bytes,  # type: ignore[no-untyped-def]
+) -> None:
+    fetcher = make_fetcher(lambda request: pdf_response(pdf_bytes("", "")))
+
+    with pytest.raises(PageFetchError, match="нет текста"):
+        await fetcher.fetch("https://fastapi.tiangolo.com/scan.pdf", ALLOWED)
+
+
+async def test_only_the_first_pages_of_a_long_pdf_are_read(
+    pdf_bytes,  # type: ignore[no-untyped-def]
+) -> None:
+    data = pdf_bytes("a", "b", "c", "d")
+    fetcher = make_fetcher(lambda request: pdf_response(data), max_pdf_pages=2)
+
+    page = await fetcher.fetch("https://fastapi.tiangolo.com/long.pdf", ALLOWED)
+
+    assert page.text == "# Страница 1\n\na\n\n# Страница 2\n\nb"
+
+
+async def test_pdf_has_its_own_size_limit_larger_than_the_one_for_html(
+    pdf_bytes,  # type: ignore[no-untyped-def]
+) -> None:
+    data = pdf_bytes("text")
+    assert len(data) > 100  # лимит HTML ниже: PDF под него не подпадает
+
+    allowed = make_fetcher(lambda request: pdf_response(data), max_bytes=100)
+    assert (await allowed.fetch("https://fastapi.tiangolo.com/a.pdf", ALLOWED)).text
+
+    too_big = make_fetcher(lambda request: pdf_response(data), max_pdf_bytes=100)
+    with pytest.raises(PageFetchError, match="слишком большая"):
+        await too_big.fetch("https://fastapi.tiangolo.com/a.pdf", ALLOWED)
+
+
+async def test_pdf_redirect_to_foreign_host_is_still_refused(
+    pdf_bytes,  # type: ignore[no-untyped-def]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "https://evil.com/a.pdf"})
+
+    with pytest.raises(PageFetchError, match="не из списка"):
+        await make_fetcher(handler).fetch("https://fastapi.tiangolo.com/a.pdf", ALLOWED)
+
+
+@pytest.mark.parametrize("content_type", ["TEXT/HTML; charset=UTF-8", "Text/Html"])
+async def test_content_type_is_compared_without_regard_to_case(
+    content_type: str,
+) -> None:
+    fetcher = make_fetcher(
+        lambda request: httpx.Response(
+            200, headers={"content-type": content_type}, content="<p>текст</p>"
+        )
+    )
+
+    assert (
+        await fetcher.fetch("https://fastapi.tiangolo.com/", ALLOWED)
+    ).text == "текст"
+
+
+async def test_pdf_content_type_is_compared_without_regard_to_case(
+    pdf_bytes,  # type: ignore[no-untyped-def]
+) -> None:
+    data = pdf_bytes("Hello")
+    fetcher = make_fetcher(
+        lambda request: pdf_response(data, **{"content-type": "Application/PDF"})
+    )
+
+    page = await fetcher.fetch("https://fastapi.tiangolo.com/a.pdf", ALLOWED)
+
+    assert page.text == "# Страница 1\n\nHello"

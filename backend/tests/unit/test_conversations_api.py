@@ -150,6 +150,9 @@ def test_web_search_question_is_streamed_from_web_not_from_documents(
 
     assert response.status_code == 200
     assert NO_WEB_ANSWER_TEXT in response.text
+    # по HTTP клиент видит этапы как события потока
+    assert "event: status" in response.text
+    assert response.text.index("event: status") < response.text.index("event: sources")
     service.search.search.assert_not_awaited()
 
 

@@ -1,18 +1,34 @@
+import asyncio
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from html.parser import HTMLParser
+from io import BytesIO
 
 import httpx
+
+from app.ingestion.parser import read_pdf
 
 # только ASCII: HTTP-заголовки кириллицу не принимают, httpx падает при создании клиента
 USER_AGENT = "DocuMindBot/0.1 (documentation search)"
 # Страница документации весит сотни килобайт; больше двух мегабайт — это уже не она
 MAX_PAGE_BYTES = 2_000_000
+# Спецификации и стандарты в PDF весят единицы мегабайт и сотни страниц
+MAX_PDF_BYTES = 15_000_000
+MAX_PDF_PAGES = 200
 MAX_REDIRECTS = 3
 
 
 class PageFetchError(Exception):
     """Страницу нельзя скачать: адрес не разрешён, ответ не тот или сеть подвела."""
+
+
+@dataclass(frozen=True)
+class FetchedPage:
+    """Скачанная страница: название (может быть пустым) и текст в виде markdown."""
+
+    title: str
+    text: str
 
 
 def is_allowed_url(url: str, allowed_domains: Sequence[str]) -> bool:
@@ -53,20 +69,26 @@ def normalize_url(url: str) -> str | None:
 
 
 class PageFetcher:
-    """Скачивает страницы только с разрешённых доменов.
+    """Скачивает страницы только с разрешённых доменов: HTML и PDF.
 
     Клиент приходит снаружи: приложение создаёт один на всё время работы (у него
     пул соединений), а тесты подставляют клиент с поддельным транспортом.
     """
 
     def __init__(
-        self, client: httpx.AsyncClient, max_bytes: int = MAX_PAGE_BYTES
+        self,
+        client: httpx.AsyncClient,
+        max_bytes: int = MAX_PAGE_BYTES,
+        max_pdf_bytes: int = MAX_PDF_BYTES,
+        max_pdf_pages: int = MAX_PDF_PAGES,
     ) -> None:
         self._client = client
         self._max_bytes = max_bytes
+        self._max_pdf_bytes = max_pdf_bytes
+        self._max_pdf_pages = max_pdf_pages
 
-    async def fetch(self, url: str, allowed_domains: Sequence[str]) -> str:
-        """Текст страницы (HTML) или PageFetchError с причиной.
+    async def fetch(self, url: str, allowed_domains: Sequence[str]) -> FetchedPage:
+        """Страница в виде markdown или PageFetchError с причиной.
 
         Список сайтов передаётся при каждом вызове: у разных профилей он разный,
         а скачиватель один на всё приложение.
@@ -93,25 +115,53 @@ class PageFetcher:
                 raise PageFetchError(f"сеть: {exc!r}") from exc
         raise PageFetchError("слишком много перенаправлений")
 
-    async def _read(self, response: httpx.Response) -> str:
+    async def _read(self, response: httpx.Response) -> FetchedPage:
         if response.status_code != 200:
             raise PageFetchError(f"ответ сайта: {response.status_code}")
-        content_type = response.headers.get("content-type", "")
-        if not content_type.startswith("text/html"):
-            raise PageFetchError(f"это не HTML: {content_type or 'тип не указан'}")
+        content_type = response.headers.get("content-type", "").lower()
+        is_pdf = content_type.startswith("application/pdf")
+        if not is_pdf and not content_type.startswith("text/html"):
+            raise PageFetchError(
+                f"это не HTML и не PDF: {content_type or 'тип не указан'}"
+            )
 
+        limit = self._max_pdf_bytes if is_pdf else self._max_bytes
         body = bytearray()
         # читаем кусками и останавливаемся на лимите: заголовку Content-Length
         # верить нельзя, а целиком читать неизвестно что — значит дать себя
         # завалить огромным ответом
         async for part in response.aiter_bytes():
             body += part
-            if len(body) > self._max_bytes:
+            if len(body) > limit:
                 raise PageFetchError("страница слишком большая")
+
+        if is_pdf:
+            # разбор PDF занимает процессор и может быть долгим: не в цикле событий
+            return await asyncio.to_thread(self._pdf_to_page, bytes(body))
         try:
-            return bytes(body).decode(response.encoding or "utf-8", errors="replace")
+            html = bytes(body).decode(response.encoding or "utf-8", errors="replace")
         except LookupError:  # сайт указал кодировку, которой Python не знает
-            return bytes(body).decode("utf-8", errors="replace")
+            html = bytes(body).decode("utf-8", errors="replace")
+        title, text = html_to_markdown(html)
+        return FetchedPage(title, text)
+
+    def _pdf_to_page(self, data: bytes) -> FetchedPage:
+        try:
+            title, pages = read_pdf(BytesIO(data), self._max_pdf_pages)
+        except (
+            Exception
+        ) as exc:  # битый или хитро собранный файл ломает разбор по-разному
+            raise PageFetchError("не удалось прочитать PDF") from exc
+        # номер страницы в заголовке первого уровня попадёт в путь раздела: по цитате
+        # видно, где искать (заголовки второго уровня чанкер вложил бы друг в друга)
+        sections = [
+            f"# Страница {number}\n\n{text}"
+            for number, text in enumerate(pages, start=1)
+            if text
+        ]
+        if not sections:
+            raise PageFetchError("в PDF нет текста (возможно, это скан)")
+        return FetchedPage(title, "\n\n".join(sections))
 
 
 # --- из HTML в markdown, который понимает наш чанкер
@@ -286,3 +336,30 @@ def html_to_markdown(html: str) -> tuple[str, str]:
     parser.feed(html)
     parser.close()
     return parser.result()
+
+
+# --- чистка markdown, который уже пришёл готовым (от поискового сервиса)
+
+# якорь-ссылка у заголовков: «Заголовок[¶](#zagolovok "Permanent link")»
+_PERMALINK = re.compile(r"\[[¶#]\]\([^)]*\)")
+# строка из одной ссылки на место этой же страницы: пункт оглавления, «Skip to content»
+_ANCHOR_ONLY_LINE = re.compile(r"^\s*(?:[*+-]\s+)?\[[^\]]*\]\(#[^)]*\)\s*$")
+
+
+def clean_markdown(text: str) -> str:
+    """Убирает из готового markdown страницы то, что только мешает поиску по смыслу.
+
+    Оглавление из ссылок на разделы и якоря у заголовков попали бы в куски текста и
+    в названия разделов (heading_path). Код внутри блоков не трогаем.
+    """
+    lines: list[str] = []
+    in_code = False
+    for line in text.splitlines():
+        if line.lstrip().startswith(("```", "~~~")):
+            in_code = not in_code
+        elif not in_code:
+            if _ANCHOR_ONLY_LINE.match(line):
+                continue
+            line = _PERMALINK.sub("", line)
+        lines.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()

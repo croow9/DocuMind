@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Self
+from typing import Literal, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -60,6 +60,13 @@ class SourceRead(BaseModel):
     heading_path: str | None
     content: str
     url: str | None = None
+
+
+class StatusData(BaseModel):
+    """Где сейчас обработка вопроса: веб-режим молчит до первого токена секунд десять."""
+
+    stage: Literal["searching", "answering"]
+    text: str
 
 
 class TokenData(BaseModel):

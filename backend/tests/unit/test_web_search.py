@@ -1,10 +1,19 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
+import pytest
+
 from app.core.config import settings
 from app.rag.web_search import (
+    TAVILY_MAX_RESULTS,
+    TAVILY_SEARCH_URL,
     FakePageFinder,
+    FoundPage,
     OpenAIPageFinder,
+    SearchBackendError,
+    TavilyPageFinder,
     build_page_finder,
 )
 
@@ -49,7 +58,7 @@ async def test_cited_pages_come_first_then_the_rest_without_repeats_and_tracking
         message("https://fastapi.tiangolo.com/c/?utm_source=openai"),
     )
 
-    urls = await finder.find("как?", DOMAINS)
+    urls = [page.url for page in await finder.find("как?", DOMAINS)]
 
     assert urls == [
         "https://fastapi.tiangolo.com/c/",  # процитирована — значит, важнее
@@ -65,7 +74,9 @@ async def test_actions_without_sources_are_ignored() -> None:
     )
     finder, _ = make_finder(open_page, search_call("https://docs.python.org/3/"))
 
-    assert await finder.find("как?", DOMAINS) == ["https://docs.python.org/3/"]
+    assert await finder.find("как?", DOMAINS) == [
+        FoundPage("https://docs.python.org/3/")
+    ]
 
 
 async def test_request_forces_search_and_names_the_sites() -> None:
@@ -87,23 +98,183 @@ async def test_request_forces_search_and_names_the_sites() -> None:
 async def test_fake_finder_returns_given_urls_and_remembers_questions() -> None:
     finder = FakePageFinder(["https://docs.python.org/3/"])
 
-    assert await finder.find("как?", DOMAINS) == ["https://docs.python.org/3/"]
-    assert finder.questions == ["как?"]
+    assert await finder.find("как?", DOMAINS) == [
+        FoundPage("https://docs.python.org/3/")
+    ]
+    assert finder.queries == ["как?"]
 
 
-def test_finder_is_chosen_by_key_presence(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_finder_is_chosen_by_the_keys_that_are_set(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = httpx.AsyncClient()
     monkeypatch.setattr(settings, "openai_api_key", "")
-    assert isinstance(build_page_finder(), FakePageFinder)
+    monkeypatch.setattr(settings, "tavily_api_key", "")
+    assert isinstance(build_page_finder(client), FakePageFinder)
 
     monkeypatch.setattr(settings, "openai_api_key", "sk-test")
-    assert isinstance(build_page_finder(), OpenAIPageFinder)
+    assert isinstance(build_page_finder(client), OpenAIPageFinder)
+
+    # Tavily важнее: он умеет фильтровать по доменам, поиск OpenAI на длинных списках нет
+    monkeypatch.setattr(settings, "tavily_api_key", "tvly-test")
+    assert isinstance(build_page_finder(client), TavilyPageFinder)
 
 
-async def test_previous_questions_are_given_to_the_search_model_as_context() -> None:
-    finder, create = make_finder(search_call())
+# --- Tavily
 
-    await finder.find("А как с yield?", DOMAINS, ["Как объявить Depends в FastAPI?"])
+KEY = "tvly-secret-key"
 
-    prompt = create.await_args.kwargs["input"]
-    assert "Как объявить Depends в FastAPI?" in prompt
-    assert prompt.endswith("Текущий вопрос: А как с yield?")
+
+def make_tavily(handler) -> TavilyPageFinder:  # type: ignore[no-untyped-def]
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return TavilyPageFinder(client, KEY)
+
+
+def tavily_answer(*results: object) -> httpx.Response:
+    return httpx.Response(200, json={"results": list(results)})
+
+
+async def test_tavily_request_restricts_search_to_profile_domains_and_asks_for_markdown() -> (
+    None
+):
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return tavily_answer()
+
+    await make_tavily(handler).find("Как объявить зависимость?", DOMAINS)
+
+    [request] = seen
+    assert str(request.url) == TAVILY_SEARCH_URL
+    assert request.headers["authorization"] == f"Bearer {KEY}"
+    body = json.loads(request.content)
+    assert body["query"] == "Как объявить зависимость?"
+    assert body["include_domains"] == DOMAINS
+    # «prefer» пускает в выдачу и чужие сайты: проверено на живом запросе
+    assert body["include_domains_mode"] == "restrict"
+    assert body["include_raw_content"] == "markdown"
+    assert body["search_depth"] == "basic"
+    assert body["max_results"] == TAVILY_MAX_RESULTS
+
+
+async def test_tavily_results_become_pages_with_titles_texts_and_snippets() -> None:
+    finder = make_tavily(
+        lambda request: tavily_answer(
+            {
+                "url": "https://fastapi.tiangolo.com/tutorial/dependencies/",
+                "title": "Зависимости",
+                "raw_content": "# Зависимости\n\nтекст",
+                "content": "отрывок",
+            }
+        )
+    )
+
+    assert await finder.find("вопрос", DOMAINS) == [
+        FoundPage(
+            "https://fastapi.tiangolo.com/tutorial/dependencies/",
+            title="Зависимости",
+            text="# Зависимости\n\nтекст",
+            snippet="отрывок",
+        )
+    ]
+
+
+async def test_http_address_is_upgraded_and_tracking_and_anchor_are_dropped() -> None:
+    finder = make_tavily(
+        lambda request: tavily_answer(
+            {
+                "url": "http://www.omg.org/spec/BPMN/?utm_source=x#top",
+                "raw_content": "t",
+            }
+        )
+    )
+
+    [page] = await finder.find("вопрос", ["omg.org"])
+
+    assert page.url == "https://www.omg.org/spec/BPMN/"
+
+
+async def test_results_of_one_page_with_different_anchors_are_merged() -> None:
+    page = "https://docs.pydantic.dev/latest/concepts/validators"
+    finder = make_tavily(
+        lambda request: tavily_answer(
+            {
+                "url": f"{page}#before",
+                "title": "Validators",
+                "raw_content": "короткий",
+                "content": "про before",
+            },
+            {"url": "https://docs.pydantic.dev/latest/other/", "raw_content": "другая"},
+            {
+                "url": f"{page}#wrap",
+                "raw_content": "самый длинный текст",
+                "content": "про wrap",
+            },
+            {"url": f"{page}#after", "raw_content": "средний", "content": "про before"},
+        )
+    )
+
+    pages = await finder.find("вопрос", ["docs.pydantic.dev"])
+
+    # порядок по первому появлению; текст самый длинный; отрывки всех якорей, без повторов
+    assert [p.url for p in pages] == [page, "https://docs.pydantic.dev/latest/other/"]
+    assert pages[0] == FoundPage(
+        page,
+        title="Validators",
+        text="самый длинный текст",
+        snippet="про before\n\nпро wrap",
+    )
+
+
+async def test_unusable_results_are_skipped_and_blank_text_means_no_text() -> None:
+    finder = make_tavily(
+        lambda request: tavily_answer(
+            "не словарь",
+            {"title": "без адреса"},
+            {"url": 123},
+            {
+                "url": "https://fastapi.tiangolo.com/a/",
+                "raw_content": "   ",
+                "content": None,
+            },
+        )
+    )
+
+    assert await finder.find("вопрос", DOMAINS) == [
+        FoundPage("https://fastapi.tiangolo.com/a/")
+    ]
+
+
+@pytest.mark.parametrize("status", [401, 429, 432, 500])
+async def test_tavily_refusal_becomes_backend_error_without_leaking_the_key(
+    status: int,
+) -> None:
+    finder = make_tavily(lambda request: httpx.Response(status, text=f"плохо {KEY}"))
+
+    with pytest.raises(SearchBackendError, match=str(status)) as exc_info:
+        await finder.find("вопрос", DOMAINS)
+
+    assert KEY not in str(exc_info.value)
+
+
+async def test_network_failure_becomes_backend_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("нет связи")
+
+    with pytest.raises(SearchBackendError, match="сеть"):
+        await make_tavily(handler).find("вопрос", DOMAINS)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, text="это не JSON"),
+        httpx.Response(200, json={"нет": "results"}),
+        httpx.Response(200, json={"results": "не список"}),
+        httpx.Response(200, json=["не", "словарь"]),
+    ],
+)
+async def test_unexpected_tavily_body_becomes_backend_error(
+    response: httpx.Response,
+) -> None:
+    with pytest.raises(SearchBackendError, match="неожиданном"):
+        await make_tavily(lambda request: response).find("вопрос", DOMAINS)
