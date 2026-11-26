@@ -5,3 +5,4 @@ from .conversation import ConversationORM as ConversationORM
 from .document import DocumentORM as DocumentORM
 from .message import MessageORM as MessageORM
 from .user import UserORM as UserORM
+from .user_web_profile import UserWebProfileORM as UserWebProfileORM

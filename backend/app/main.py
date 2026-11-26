@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from app.api.v1.auth import router as auth_router
 from app.api.v1.conversations import router as conversations_router
 from app.api.v1.documents import router as documents_router
+from app.api.v1.my_web_profiles import router as my_web_profiles_router
 from app.api.v1.web_profiles import router as web_profiles_router
 from app.core.cache import build_cache
 from app.core.config import settings
@@ -57,6 +58,7 @@ app.include_router(auth_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")
 app.include_router(conversations_router, prefix="/api/v1")
 app.include_router(web_profiles_router, prefix="/api/v1")
+app.include_router(my_web_profiles_router, prefix="/api/v1")
 
 
 @app.get("/")

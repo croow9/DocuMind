@@ -23,6 +23,7 @@ from app.rag.web_profiles import WebProfile, WebProfiles
 from app.repositories.conversation_repo import ConversationRepository
 from app.repositories.document_repo import DocumentRepository
 from app.repositories.message_repo import MessageRepository
+from app.repositories.user_web_profile_repo import UserWebProfileRepository
 from app.schemas.chat import (
     DEFAULT_CONVERSATION_TITLE,
     DoneData,
@@ -34,6 +35,10 @@ from app.schemas.chat import (
 )
 from app.schemas.search import RetrievedChunk
 from app.services.search_service import SearchService
+from app.services.user_web_profile_service import (
+    NOT_FOUND_TEXT as PERSONAL_PROFILE_NOT_FOUND_TEXT,
+)
+from app.services.user_web_profile_service import web_profile_from_row
 from app.services.web_search_service import WebSearchService
 
 logger = logging.getLogger(__name__)
@@ -72,6 +77,7 @@ class ChatService:
         self.conversations = ConversationRepository(session)
         self.messages = MessageRepository(session)
         self.documents = DocumentRepository(session)
+        self.user_profiles = UserWebProfileRepository(session)
         self.search = search
         self.chat = chat
         self.web = web
@@ -97,7 +103,7 @@ class ChatService:
 
         if payload.web_search:
             # неизвестный профиль — такая же ошибка клиента, как чужой документ
-            self._web_profile(payload)
+            await self._resolve_web_profile(owner_id, payload)
 
         if payload.document_ids is not None:
             owned = await self.documents.get_owned_ids(payload.document_ids, owner_id)
@@ -123,7 +129,21 @@ class ChatService:
             for message in history
         ]
 
-    def _web_profile(self, payload: MessageCreate) -> WebProfile:
+    async def _resolve_web_profile(
+        self, owner_id: UUID, payload: MessageCreate
+    ) -> WebProfile:
+        """Набор сайтов для вопроса: личный список владельца или профиль из файла."""
+        if payload.my_web_profile_id is not None:
+            row = await self.user_profiles.get_by_id(
+                payload.my_web_profile_id, owner_id
+            )
+            if row is None:
+                # чужой список неотличим от несуществующего
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=PERSONAL_PROFILE_NOT_FOUND_TEXT,
+                )
+            return web_profile_from_row(row)
         profile = self.profiles.get(payload.web_profile)
         if profile is None:
             raise HTTPException(
@@ -158,7 +178,7 @@ class ChatService:
                 previous = [m.content for m in history if m.role == "user"]
                 sources = await self.web.search(
                     payload.question,
-                    self._web_profile(payload),
+                    await self._resolve_web_profile(owner_id, payload),
                     context=previous[-MAX_WEB_CONTEXT_QUESTIONS:],
                 )
             else:

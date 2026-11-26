@@ -33,6 +33,9 @@ class MessageCreate(BaseModel):
     # Набор сайтов для поиска в интернете (список: GET /web-profiles); без него
     # берётся профиль по умолчанию
     web_profile: str | None = Field(default=None, min_length=1, max_length=64)
+    # Вместо готового набора сайтов — личный список пользователя
+    # (POST /my-web-profiles); чужой или удалённый список даёт 404
+    my_web_profile_id: UUID | None = None
 
     @model_validator(mode="after")
     def _web_search_excludes_document_ids(self) -> Self:
@@ -44,6 +47,16 @@ class MessageCreate(BaseModel):
     def _web_profile_needs_web_search(self) -> Self:
         if self.web_profile is not None and not self.web_search:
             raise ValueError("web_profile имеет смысл только вместе с web_search")
+        return self
+
+    @model_validator(mode="after")
+    def _my_web_profile_rules(self) -> Self:
+        if self.my_web_profile_id is None:
+            return self
+        if not self.web_search:
+            raise ValueError("my_web_profile_id имеет смысл только вместе с web_search")
+        if self.web_profile is not None:
+            raise ValueError("web_profile и my_web_profile_id указывать вместе нельзя")
         return self
 
 

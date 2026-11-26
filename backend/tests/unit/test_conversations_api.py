@@ -203,3 +203,45 @@ def test_profiles_endpoint_lists_choices_without_the_domains(client_for) -> None
             "is_default": False,
         },
     ]
+
+
+def test_personal_list_of_someone_else_gives_real_404_not_a_stream(client_for) -> None:  # type: ignore[no-untyped-def]
+    service = make_service(conversation_exists=True)
+    service.user_profiles = AsyncMock()
+    service.user_profiles.get_by_id.return_value = None
+    client = client_for(service)
+
+    response = client.post(
+        f"/api/v1/conversations/{uuid4()}/messages",
+        json={
+            "question": "как?",
+            "web_search": True,
+            "my_web_profile_id": str(uuid4()),
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Список сайтов не найден"}
+    service.messages.create.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {},  # без web_search
+        {"web_search": True, "web_profile": "analyst"},  # вместе с профилем из файла
+        {
+            "web_search": True,
+            "document_ids": [str(uuid4())],
+        },  # вместе со своими документами
+    ],
+)
+def test_personal_list_with_conflicting_fields_is_rejected(client_for, extra) -> None:  # type: ignore[no-untyped-def]
+    client = client_for(make_service(conversation_exists=True))
+
+    response = client.post(
+        f"/api/v1/conversations/{uuid4()}/messages",
+        json={"question": "как?", "my_web_profile_id": str(uuid4()), **extra},
+    )
+
+    assert response.status_code == 422

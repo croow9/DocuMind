@@ -11,7 +11,9 @@ from app.rag.web_profiles import (
     PROFILES_PATH,
     WebProfile,
     WebProfiles,
+    clean_domains,
     load_web_profiles,
+    normalize_domain,
 )
 
 
@@ -146,3 +148,90 @@ def test_shipped_profiles_allow_what_they_promise() -> None:
     assert is_allowed_url("https://fastapi.tiangolo.com/", backend.domains)
     assert not is_allowed_url("https://fastapi.tiangolo.com/", analyst.domains)
     assert is_allowed_url("https://www.omg.org/spec/BPMN/", analyst.domains)
+
+
+# --- normalize_domain: пользователь вставляет то, что видит в адресной строке
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("docs.site.com", "docs.site.com"),
+        ("  Docs.Site.COM  ", "docs.site.com"),
+        ("https://docs.site.com", "docs.site.com"),
+        ("https://Docs.Site.com/guide/intro?x=1#top", "docs.site.com"),
+        ("http://docs.site.com/", "docs.site.com"),
+        ("docs.site.com/guide", "docs.site.com"),
+        ("docs.site.com?q=1", "docs.site.com"),
+        ("docs.site.com.", "docs.site.com"),  # точка в конце — запись корня DNS
+        ("//docs.site.com/a", "docs.site.com"),
+    ],
+)
+def test_normalize_domain_reduces_pasted_text_to_a_host(
+    raw: str, expected: str
+) -> None:
+    assert normalize_domain(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "   ",
+        "https://",
+        "/guide",
+        "user:pass@docs.site.com",  # логин в адресе
+        "https://user@docs.site.com/",
+        "docs.site.com:8080",  # порт: наша проверка адресов его не пропустит
+        "https://docs.site.com:443/",
+        "docs.site.com:порт",
+    ],
+)
+def test_normalize_domain_rejects_what_cannot_be_a_plain_site(raw: str) -> None:
+    with pytest.raises(ValueError):
+        normalize_domain(raw)
+
+
+# --- clean_domains: общие правила для списков из файла и личных
+
+
+def test_clean_domains_applies_the_given_limit() -> None:
+    assert clean_domains(["a.com", "b.com"], 2) == ("a.com", "b.com")
+    with pytest.raises(ValueError, match="больше 2"):
+        clean_domains(["a.com", "b.com", "c.com"], 2)
+
+
+def test_clean_domains_accepts_any_iterable_and_keeps_order() -> None:
+    assert clean_domains(iter(["z.com", "a.com"]), 5) == ("z.com", "a.com")
+
+
+@pytest.mark.parametrize(
+    "domain",
+    ["printer.local", "wiki.internal", "nas.lan", "site.localhost", "x.corp",
+     "app.home", "a.intranet", "a.test", "a.invalid", "a.example", "1.0.0.127.arpa"],
+)  # fmt: skip
+def test_internal_names_are_rejected_as_invisible_from_the_internet(
+    domain: str,
+) -> None:
+    with pytest.raises(ValueError, match="внутреннее имя"):
+        clean_domains([domain], 5)
+
+
+def test_a_zone_that_only_looks_internal_is_not_rejected() -> None:
+    # проверяется последняя часть имени целиком, а не вхождение подстроки
+    assert clean_domains(["local.com", "home.org", "testing.dev"], 5) == (
+        "local.com",
+        "home.org",
+        "testing.dev",
+    )
+
+
+def test_web_profile_fetch_pages_is_on_by_default_and_can_be_switched_off() -> None:
+    assert make_profile().fetch_pages is True
+    assert make_profile(fetch_pages=False).fetch_pages is False
+
+
+def test_profiles_from_the_file_are_allowed_to_fetch_pages() -> None:
+    profiles = load_web_profiles(settings.web_default_profile)
+
+    assert all(profile.fetch_pages for profile in profiles.all())

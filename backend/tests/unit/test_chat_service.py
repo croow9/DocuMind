@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
@@ -7,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.sse import ServerSentEvent
 
-from app.models import MessageORM
+from app.models import MessageORM, UserWebProfileORM
 from app.models.message import MessageRole
 from app.rag.llm import ChatClient, ChatMessage, FakeChat
 from app.rag.prompt import NO_ANSWER_TEXT, NO_WEB_ANSWER_TEXT, WEB_SYSTEM_PROMPT
@@ -525,3 +526,104 @@ async def test_web_search_gets_only_users_previous_questions_as_context() -> Non
     service.web.search.assert_awaited_once_with(
         "уточнение", BACKEND, context=["второй вопрос", "третий вопрос"]
     )
+
+
+# --- личные списки сайтов
+
+
+def make_personal_row(**overrides: object) -> UserWebProfileORM:
+    data: dict[str, object] = {
+        "id": uuid4(),
+        "owner_id": OWNER_ID,
+        "title": "Мой список",
+        "description": "",
+        "domains": ["doc.rust-lang.org", "docs.rs"],
+        "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+    }
+    return UserWebProfileORM(**{**data, **overrides})
+
+
+async def test_prepare_looks_for_the_personal_list_among_the_owners_lists_only() -> (
+    None
+):
+    service = make_prepare_service()
+    row = make_personal_row()
+    service.user_profiles = AsyncMock()
+    service.user_profiles.get_by_id.return_value = row
+
+    await service.prepare(
+        OWNER_ID,
+        CONVERSATION_ID,
+        MessageCreate(question="как?", web_search=True, my_web_profile_id=row.id),
+    )
+
+    # чужой список не найдётся: поиск идёт по паре (id списка, владелец)
+    service.user_profiles.get_by_id.assert_awaited_once_with(row.id, OWNER_ID)
+    service.messages.create.assert_awaited_once()
+
+
+async def test_prepare_foreign_or_deleted_personal_list_is_404_before_saving_question() -> (
+    None
+):
+    service = make_prepare_service()
+    service.user_profiles = AsyncMock()
+    service.user_profiles.get_by_id.return_value = None
+
+    with pytest.raises(HTTPException) as exc_info:
+        await service.prepare(
+            OWNER_ID,
+            CONVERSATION_ID,
+            MessageCreate(question="как?", web_search=True, my_web_profile_id=uuid4()),
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "Список сайтов не найден"
+    service.messages.create.assert_not_awaited()
+    service.session.commit.assert_not_awaited()
+
+
+async def test_prepare_without_a_personal_list_does_not_query_them() -> None:
+    service = make_prepare_service()
+    service.user_profiles = AsyncMock()
+
+    await service.prepare(
+        OWNER_ID,
+        CONVERSATION_ID,
+        MessageCreate(question="как?", web_search=True, web_profile="analyst"),
+    )
+
+    service.user_profiles.get_by_id.assert_not_awaited()
+
+
+async def test_web_search_uses_the_personal_list_as_a_profile_without_own_fetching() -> (
+    None
+):
+    service, _, _ = make_service(FakeChat(), [])
+    service.web.search.return_value = []
+    row = make_personal_row()
+    service.user_profiles = AsyncMock()
+    service.user_profiles.get_by_id.return_value = row
+    payload = MessageCreate(question="как?", web_search=True, my_web_profile_id=row.id)
+
+    [event async for event in service.answer(OWNER_ID, CONVERSATION_ID, payload, [])]
+
+    service.user_profiles.get_by_id.assert_awaited_once_with(row.id, OWNER_ID)
+    service.web.search.assert_awaited_once()
+    question, profile = service.web.search.await_args.args
+    assert question == "как?"
+    assert profile.domains == ("doc.rust-lang.org", "docs.rs")
+    # это условие безопасности: по доменам пользователя наш сервер сам не ходит
+    assert profile.fetch_pages is False
+
+
+async def test_personal_list_removed_during_the_answer_ends_in_an_error_event() -> None:
+    service, _, save = make_service(FakeChat(), [])
+    service.user_profiles = AsyncMock()
+    service.user_profiles.get_by_id.return_value = None
+    payload = MessageCreate(question="как?", web_search=True, my_web_profile_id=uuid4())
+
+    events = [e async for e in service.answer(OWNER_ID, CONVERSATION_ID, payload, [])]
+
+    assert [e.event for e in events] == ["status", "error"]
+    service.web.search.assert_not_awaited()
+    save.assert_not_awaited()

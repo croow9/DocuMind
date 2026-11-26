@@ -85,10 +85,14 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _search_key(profile: str, max_pages: int, query: str) -> str:
-    # регистр и пробелы в запросе роли не играют; профиль и число страниц важны:
-    # от них зависит, какие страницы попадут в запись
-    return f"web:search:v1:{profile}:{max_pages}:{_digest(_normalized(query))}"
+def _search_key(domains: Sequence[str], max_pages: int, query: str) -> str:
+    # В ключе не имя профиля, а набор сайтов: именно от него зависит, какие страницы
+    # попадут в запись. Имена личных списков у каждого пользователя свои, а одинаковые
+    # наборы могут делить записи (страницы публичные). Правка файла профилей тоже
+    # не оставит на сутки записи по старому списку. Регистр и пробелы запроса
+    # роли не играют
+    sites = _digest("\n".join(sorted(domains)))
+    return f"web:search:v2:{sites}:{max_pages}:{_digest(_normalized(query))}"
 
 
 def _page_key(url: str) -> str:
@@ -164,7 +168,7 @@ class WebSearchService:
         picked = await self._find_pages(query, profile)
         # страницы качаются одновременно: это сеть, а не общая сессия БД
         pages = await asyncio.gather(
-            *(self._load_page(page, profile.domains) for page in picked)
+            *(self._load_page(page, profile) for page in picked)
         )
         fragments = [fragment for page in pages for fragment in page]
         if not fragments:
@@ -195,7 +199,7 @@ class WebSearchService:
         Публичные страницы одинаковы для всех, поэтому запись общая, но ключ
         включает профиль: у профилей разные списки сайтов.
         """
-        key = _search_key(profile.name, self.max_pages, query)
+        key = _search_key(profile.domains, self.max_pages, query)
         cached = await self._cache_get_json(key)
         if isinstance(cached, list):
             try:
@@ -231,7 +235,12 @@ class WebSearchService:
     def _compact(self, page: FoundPage) -> FoundPage:
         """Текст страницы, очищенный и не длиннее того, что мы всё равно прочтём."""
         if page.text is None:
-            return page
+            if page.snippet is None:
+                return page
+            # отрывок без полного текста станет единственным текстом страницы
+            # у личных списков, поэтому очищаем его так же, как текст
+            snippet = clean_markdown(page.snippet)[:MAX_FULL_TEXT_CHARS]
+            return FoundPage(page.url, page.title, None, snippet or None)
         text = clean_markdown(page.text)
         if len(text) > MAX_FULL_TEXT_CHARS and page.snippet:
             text = clean_markdown(page.snippet)
@@ -289,15 +298,17 @@ class WebSearchService:
             unique.setdefault(_page_identity(page.url), page)
         return list(unique.values())[: self.max_pages]
 
-    async def _load_page(
-        self, page: FoundPage, domains: Sequence[str]
-    ) -> list[_Fragment]:
+    async def _load_page(self, page: FoundPage, profile: WebProfile) -> list[_Fragment]:
         """Куски одной страницы; недоступная страница не ломает остальные."""
         title, text = page.title or "", ""
         if page.text is not None:
             text = page.text
+        elif not profile.fetch_pages:
+            # Сами по адресу не ходим (см. WebProfile.fetch_pages): остаётся то, что
+            # прислал поисковик. Если и этого нет, страница молча пропускается
+            text = page.snippet or ""
         else:
-            fetched = await self._fetch_page(page.url, domains)
+            fetched = await self._fetch_page(page.url, profile.domains)
             if fetched is None:
                 return []
             title, text = title or fetched.title, fetched.text

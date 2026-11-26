@@ -383,7 +383,7 @@ async def test_huge_document_without_snippets_is_cut_to_the_chunk_limit() -> Non
 
 # --- кэш: найденные страницы и скачанные страницы
 
-SEARCH_PREFIX = "web:search:v1:"
+SEARCH_PREFIX = "web:search:v2:"
 PAGE_PREFIX = "web:page:v1:"
 
 
@@ -418,17 +418,47 @@ async def test_cache_key_ignores_case_and_spaces_but_not_the_query_itself() -> N
     assert finder.queries == ["FastAPI   Yield", "fastapi depends"]
 
 
-async def test_profiles_do_not_share_cache_entries() -> None:
+async def test_cache_depends_on_the_set_of_sites_not_on_the_profile_name() -> None:
+    python_page = "https://docs.python.org/3/library/asyncio.html"
     service, finder, _ = make_service(
-        {}, found=[FoundPage(GOOD, text="# Раздел\n\nтекст")]
+        {},
+        found=[
+            FoundPage(GOOD, text="# Раздел\n\nтекст про FastAPI"),
+            FoundPage(python_page, text="# Раздел\n\nтекст про asyncio"),
+        ],
     )
-    other = WebProfile(name="other", title="Другой", domains=tuple(DOMAINS))
+    same_sites = WebProfile(name="other", title="Другой", domains=tuple(DOMAINS))
+    other_sites = WebProfile(
+        name="backend", title="Тот же", domains=("docs.python.org",)
+    )
 
-    await service.search("вопрос", PROFILE)
-    await service.search("вопрос", other)
+    first = await service.search("вопрос", PROFILE)
+    again = await service.search("вопрос", same_sites)  # те же сайты: готовое
+    other = await service.search("вопрос", other_sites)  # то же имя, другие сайты
 
     assert len(finder.queries) == 2
     assert len(cached(service, SEARCH_PREFIX)) == 2
+    assert again == first
+    # страницы чужого набора сайтов из общего кэша не просачиваются
+    assert [r.url for r in first] == [GOOD]
+    assert [r.url for r in other] == [python_page]
+
+
+async def test_order_of_sites_does_not_change_the_cache_entry() -> None:
+    first = WebProfile(
+        name="a", title="A", domains=("docs.python.org", "peps.python.org")
+    )
+    second = WebProfile(
+        name="b", title="B", domains=("peps.python.org", "docs.python.org")
+    )
+    service, finder, _ = make_service(
+        {}, found=[FoundPage("https://docs.python.org/3/x", text="# Раздел\n\nтекст")]
+    )
+
+    await service.search("вопрос", first)
+    await service.search("вопрос", second)
+
+    assert len(finder.queries) == 1
 
 
 async def test_entry_is_stored_with_the_configured_lifetime() -> None:
@@ -674,3 +704,91 @@ async def test_zero_lifetime_rewrites_every_time() -> None:
     await service.search("вопрос", PROFILE)
 
     assert len(rewriter.calls) == 2
+
+
+# --- личные списки: свои скачивания нет, кэш общий по набору сайтов
+
+MINE = WebProfile(
+    name="my-0123456789ab",
+    title="Мой список",
+    domains=tuple(DOMAINS),
+    fetch_pages=False,
+)
+
+
+async def test_personal_list_never_downloads_pages_itself() -> None:
+    # поисковик прислал только адрес: у обычного профиля мы бы скачали страницу
+    service, _, fetch = make_service(
+        {GOOD: page("Название", s="текст")}, found=[FoundPage(GOOD)]
+    )
+
+    results = await service.search("вопрос", MINE)
+
+    assert results == [] and fetch.await_count == 0
+    assert cached(service, PAGE_PREFIX) == {}
+
+
+async def test_personal_list_uses_the_excerpt_when_there_is_no_full_text() -> None:
+    service, _, fetch = make_service(
+        {}, found=[FoundPage(GOOD, title="Статья", snippet="Короткий отрывок статьи")]
+    )
+
+    [result] = await service.search("вопрос", MINE)
+
+    assert result.content == "Короткий отрывок статьи"
+    assert result.document_title == "Статья" and result.url == GOOD
+    assert fetch.await_count == 0
+
+
+async def test_personal_list_still_uses_full_text_from_the_search() -> None:
+    service, _, fetch = make_service(
+        {}, found=[FoundPage(GOOD, text="# Раздел\n\nполный текст", snippet="отрывок")]
+    )
+
+    [result] = await service.search("вопрос", MINE)
+
+    assert "полный текст" in result.content
+    assert fetch.await_count == 0
+
+
+async def test_personal_list_still_filters_pages_by_its_own_sites() -> None:
+    service, _, _ = make_service(
+        {},
+        found=[
+            FoundPage(EVIL, text="# Чужое\n\nвредное"),
+            FoundPage(GOOD, text="# А\n\nтекст"),
+        ],
+    )
+
+    results = await service.search("вопрос", MINE)
+
+    assert [r.url for r in results] == [GOOD]
+
+
+async def test_excerpt_is_cleaned_before_it_is_cached() -> None:
+    service, _, _ = make_service(
+        {}, found=[FoundPage(GOOD, snippet="Заголовок [¶](#anchor)\n\nтекст")]
+    )
+
+    await service.search("вопрос", MINE)
+
+    [raw] = cached(service, SEARCH_PREFIX).values()
+    assert "¶" not in json.loads(raw)[0]["snippet"]
+
+
+async def test_page_without_text_and_excerpt_is_skipped_for_personal_list() -> None:
+    service, _, fetch = make_service({}, found=[FoundPage(GOOD)])
+
+    assert await service.search("вопрос", MINE) == []
+    assert fetch.await_count == 0
+
+
+async def test_excerpt_is_cut_to_what_is_read_before_it_is_cached() -> None:
+    service, _, _ = make_service(
+        {}, found=[FoundPage(GOOD, snippet="я" * (MAX_FULL_TEXT_CHARS * 2))]
+    )
+
+    await service.search("вопрос", MINE)
+
+    [raw] = cached(service, SEARCH_PREFIX).values()
+    assert len(json.loads(raw)[0]["snippet"]) == MAX_FULL_TEXT_CHARS
